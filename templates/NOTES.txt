@@ -1,0 +1,56 @@
+========================================================================
+ clickhouse-aio  (official ClickHouse Operator + Keeper + Cluster)
+========================================================================
+
+Release:   {{ .Release.Name }}
+Namespace: {{ .Release.Namespace }}
+
+{{- if .Values.operator.enabled }}
+
+Operator
+  The official ClickHouse Operator is installed
+  (subchart: oci://ghcr.io/clickhouse/clickhouse-operator-helm).
+
+  Prerequisite: cert-manager must already be present when
+  operator.certManager.enabled=true (default).
+
+  kubectl get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/name=clickhouse-operator-helm
+{{- end }}
+
+{{- if and .Values.cluster .Values.cluster.enabled }}
+
+Cluster
+  Keeper:     KeeperCluster   (replicas={{ .Values.cluster.keeper.replicas }})
+  ClickHouse: ClickHouseCluster (shards={{ .Values.cluster.clickhouse.shards }} × replicas={{ .Values.cluster.clickhouse.replicas }})
+
+  Status:
+    kubectl get keeperclusters,clickhouseclusters -n {{ .Release.Namespace }}
+    kubectl get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/instance={{ .Release.Name }}
+
+  Default user password Secret:
+    kubectl get secret -n {{ .Release.Namespace }} -l app.kubernetes.io/component=clickhouse
+
+  Connect (in-cluster, native protocol):
+    kubectl exec -it -n {{ .Release.Namespace }} \
+      $(kubectl get pods -n {{ .Release.Namespace }} -l 'app.kubernetes.io/component=clickhouse' -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo '<clickhouse-pod>') \
+      -- clickhouse-client --password "$(kubectl get secret -n {{ .Release.Namespace }} -o jsonpath='{.items[0].data.password}' 2>/dev/null | head -1 | base64 -d 2>/dev/null)"
+
+  Port-forward HTTP UI / client:
+    kubectl port-forward -n {{ .Release.Namespace }} svc/<cluster-name>-clickhouse 8123:8123 9000:9000
+{{- end }}
+
+Sizing (this profile)
+  Workload class : small-business production
+  Keeper         : 3 × (0.5–1 CPU, 1–2Gi RAM, 20Gi disk)
+  ClickHouse     : 2 × (2–4 CPU, 8–16Gi RAM, 200Gi disk), 1 shard
+  Scale next     : increase clickhouse.replicas → 3, then shards, then storageClass SSD
+
+Notes
+  • Official operator CRDs: ClickHouseCluster / KeeperCluster (clickhouse.com/v1alpha1)
+  • Altinity helm-charts/clickhouse uses a *different* operator (CHI/CHK) and is
+    not mixed into this release — production sizing patterns were used as reference.
+  • Set a durable storageClassName before production traffic.
+  • Do not change keeper.replicas after the first successful deploy.
+
+Docs: https://clickhouse.com/docs/clickhouse-operator/overview
+========================================================================

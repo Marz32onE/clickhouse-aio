@@ -1,0 +1,45 @@
+{{- if and .Values.tls.enabled .Values.tls.createCertificates }}
+{{- if not .Values.tls.issuerRef.name }}
+{{- fail "tls.enabled with createCertificates requires tls.issuerRef.name" }}
+{{- end }}
+{{- $ns := .Release.Namespace }}
+{{- $chName := include "cluster.clickhouseName" . }}
+{{- $keeperName := include "cluster.keeperName" . }}
+{{- if and .Values.keeper.enabled (not .Values.tls.keeper.existingSecret) }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ $keeperName }}-keeper-tls
+  labels:
+    {{- include "cluster.labels" . | nindent 4 }}
+    app.kubernetes.io/component: keeper-tls
+spec:
+  secretName: {{ include "cluster.keeperTlsSecretName" . }}
+  issuerRef:
+    name: {{ .Values.tls.issuerRef.name }}
+    kind: {{ .Values.tls.issuerRef.kind }}
+  # Operator service pattern: <KeeperCluster.metadata.name>-keeper-headless
+  dnsNames:
+    - "*.{{ $keeperName }}-keeper-headless.{{ $ns }}.svc"
+    - "*.{{ $keeperName }}-keeper-headless.{{ $ns }}.svc.cluster.local"
+---
+{{- end }}
+{{- if and .Values.clickhouse.enabled (not .Values.tls.clickhouse.existingSecret) }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ $chName }}-clickhouse-tls
+  labels:
+    {{- include "cluster.labels" . | nindent 4 }}
+    app.kubernetes.io/component: clickhouse-tls
+spec:
+  secretName: {{ include "cluster.clickhouseTlsSecretName" . }}
+  issuerRef:
+    name: {{ .Values.tls.issuerRef.name }}
+    kind: {{ .Values.tls.issuerRef.kind }}
+  # Operator service pattern: <ClickHouseCluster.metadata.name>-clickhouse-headless
+  dnsNames:
+    - "*.{{ $chName }}-clickhouse-headless.{{ $ns }}.svc"
+    - "*.{{ $chName }}-clickhouse-headless.{{ $ns }}.svc.cluster.local"
+{{- end }}
+{{- end }}

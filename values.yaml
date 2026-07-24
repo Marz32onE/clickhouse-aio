@@ -1,0 +1,194 @@
+# =============================================================================
+# clickhouse-aio — production defaults (small-business size)
+# =============================================================================
+# Topology (default):
+#   - Official ClickHouse Operator (cluster-scoped)
+#   - ClickHouse Keeper: 3 nodes (quorum)
+#   - ClickHouse: 1 shard × 2 replicas (HA, no over-sharding)
+#   - Storage: 200Gi data / 20Gi keeper per pod
+#   - Resources: CH 2–4 CPU / 8–16Gi RAM; Keeper 0.5–1 CPU / 1–2Gi RAM
+#
+# Prerequisites:
+#   - Kubernetes >= 1.28 (operator recommends 1.33+)
+#   - cert-manager (required when operator.certManager.enabled=true, default)
+#   - StorageClass with volume expansion preferred (set storageClassName below)
+#
+# Install:
+#   helm dependency update
+#   helm upgrade --install ch-aio . -n clickhouse --create-namespace
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Official ClickHouse Operator (subchart alias: operator)
+# Chart: oci://ghcr.io/clickhouse/clickhouse-operator-helm
+# Docs:  https://clickhouse.com/docs/clickhouse-operator/install/helm
+# -----------------------------------------------------------------------------
+operator:
+  enabled: true
+
+  ## Watch all namespaces (empty = cluster-wide). Restrict if multi-tenant.
+  controller:
+    watchNamespaces: []
+    pdbManagement:
+      enabled: true
+
+  manager:
+    enabled: true
+    replicas: 1
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 256Mi
+    # Drop the chart's multi-arch affinity pin if your nodes are homogeneous
+    # affinity: {}
+
+  rbac:
+    namespaced: false
+    helpers:
+      enabled: false
+
+  serviceAccount:
+    enabled: true
+
+  crd:
+    enabled: true
+    keep: true
+
+  metrics:
+    enabled: true
+    port: 8080
+    secure: true
+
+  ## Webhooks require cert-manager
+  certManager:
+    enabled: true
+
+  webhook:
+    enabled: true
+    port: 9443
+
+  prometheus:
+    scraping_annotations: true
+    ## Set true if prometheus-operator ServiceMonitor CRDs exist
+    enabled: false
+
+  networkPolicy:
+    enabled: false
+
+# -----------------------------------------------------------------------------
+# Cluster subchart — KeeperCluster + ClickHouseCluster CRs
+# -----------------------------------------------------------------------------
+cluster:
+  enabled: true
+
+  commonLabels:
+    environment: production
+    app.kubernetes.io/part-of: clickhouse-aio
+
+  # ---- ClickHouse Keeper ----------------------------------------------------
+  keeper:
+    enabled: true
+    replicas: 3
+    image:
+      repository: clickhouse/clickhouse-keeper
+      tag: "25.8"
+      pullPolicy: IfNotPresent
+    persistence:
+      ## Set to your CSI class (e.g. gp3, premium-rwo, local-path for lab)
+      storageClassName: ""
+      accessModes:
+        - ReadWriteOnce
+      size: 20Gi
+    resources:
+      requests:
+        cpu: 500m
+        memory: 1Gi
+      limits:
+        cpu: "1"
+        memory: 2Gi
+    podTemplate:
+      topologyZoneKey: topology.kubernetes.io/zone
+      nodeHostnameKey: kubernetes.io/hostname
+
+  # ---- ClickHouse servers ---------------------------------------------------
+  clickhouse:
+    enabled: true
+    ## 2 replicas = HA for small business; bump to 3 for stricter quorum reads
+    replicas: 2
+    ## Stay single-shard until you need horizontal scale-out
+    shards: 1
+    image:
+      repository: clickhouse/clickhouse-server
+      tag: "25.8"
+      pullPolicy: IfNotPresent
+    persistence:
+      storageClassName: ""
+      accessModes:
+        - ReadWriteOnce
+      ## Per-replica; plan for ~6–12 months of compressed analytics data
+      size: 200Gi
+    resources:
+      requests:
+        cpu: "2"
+        memory: 8Gi
+      limits:
+        cpu: "4"
+        memory: 16Gi
+    podTemplate:
+      topologyZoneKey: topology.kubernetes.io/zone
+      nodeHostnameKey: kubernetes.io/hostname
+
+    defaultUser:
+      ## Prefer: --set cluster.clickhouse.defaultUser.password='...'
+      ## or create a Secret and set existingSecret
+      password: ""
+      existingSecret: ""
+      existingSecretKey: password
+      passwordType: password
+      autoGenerate: true
+
+    settings:
+      enableDatabaseSync: true
+      extraConfig:
+        max_concurrent_queries: 100
+        max_server_memory_usage_to_ram_ratio: 0.9
+        background_pool_size: 16
+        background_merges_mutations_concurrency_ratio: 2
+        mark_cache_size: 5368709120
+        uncompressed_cache_size: 8589934592
+        logger:
+          level: information
+          console: 1
+        prometheus:
+          endpoint: /metrics
+          port: 9363
+          metrics: true
+          events: true
+          asynchronous_metrics: true
+          status_info: true
+      ## Optional app users (do not put plaintext passwords here)
+      extraUsersConfig: {}
+
+    additionalPorts:
+      - name: metrics
+        port: 9363
+
+  # ---- TLS (optional; needs cert-manager Issuer) ----------------------------
+  tls:
+    enabled: false
+    required: true
+    createCertificates: true
+    issuerRef:
+      name: ""
+      kind: Issuer
+
+  # ---- External access (optional) -------------------------------------------
+  loadBalancer:
+    enabled: false
+    port: 9000
+    targetPort: 9000
+    loadBalancerSourceRanges: []
+    annotations: {}

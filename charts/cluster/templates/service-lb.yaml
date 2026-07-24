@@ -1,0 +1,35 @@
+{{- if and .Values.loadBalancer.enabled .Values.clickhouse.enabled }}
+{{- $chName := include "cluster.clickhouseName" . }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $chName }}-lb
+  labels:
+    {{- include "cluster.labels" . | nindent 4 }}
+    app.kubernetes.io/component: clickhouse-lb
+    {{- with .Values.loadBalancer.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .Values.loadBalancer.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: LoadBalancer
+  {{- with .Values.loadBalancer.loadBalancerSourceRanges }}
+  loadBalancerSourceRanges:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  selector:
+    {{- if .Values.loadBalancer.selector }}
+    {{- toYaml .Values.loadBalancer.selector | nindent 4 }}
+    {{- else }}
+    # Official operator labels pods as app: <cluster-name>-clickhouse
+    app: {{ printf "%s-clickhouse" $chName | quote }}
+    {{- end }}
+  ports:
+    - name: native
+      port: {{ .Values.loadBalancer.port }}
+      targetPort: {{ .Values.loadBalancer.targetPort }}
+      protocol: TCP
+{{- end }}

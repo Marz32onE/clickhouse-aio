@@ -1,0 +1,192 @@
+## Default values for the cluster subchart.
+## Parent chart (clickhouse-aio) overrides these for production small-business sizing.
+
+nameOverride: ""
+fullnameOverride: ""
+## Override shared base name for KeeperCluster + ClickHouseCluster CRs
+## (official examples use the same name for both kinds).
+clusterName: ""
+commonLabels: {}
+
+# ---------------------------------------------------------------------------
+# ClickHouse Keeper (coordination — required for replication)
+# ---------------------------------------------------------------------------
+keeper:
+  enabled: true
+  ## Override KeeperCluster metadata.name (default: shared clusterName)
+  name: ""
+  ## Odd number required for quorum. Do not change after first deploy.
+  replicas: 3
+
+  image:
+    repository: clickhouse/clickhouse-keeper
+    tag: "25.8"
+    pullPolicy: IfNotPresent
+
+  persistence:
+    storageClassName: ""
+    accessModes:
+      - ReadWriteOnce
+    size: 20Gi
+    annotations: {}
+
+  ## Small-business production resources (coordination is light vs server)
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: "1"
+      memory: 2Gi
+
+  podTemplate:
+    ## Spread across AZs when the cluster has zone labels
+    topologyZoneKey: topology.kubernetes.io/zone
+    nodeHostnameKey: kubernetes.io/hostname
+    labels: {}
+    annotations: {}
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+    topologySpreadConstraints: []
+
+  settings: {}
+  # settings:
+  #   extraConfig:
+  #     logger/level: information
+
+# ---------------------------------------------------------------------------
+# ClickHouse server cluster
+# ---------------------------------------------------------------------------
+clickhouse:
+  enabled: true
+  ## Override ClickHouseCluster metadata.name (default: shared clusterName)
+  name: ""
+  ## Replicas per shard (HA). 2 is enough for small production.
+  replicas: 2
+  ## Horizontal partitions. Keep 1 until you need more write/query scale.
+  shards: 1
+
+  image:
+    repository: clickhouse/clickhouse-server
+    tag: "25.8"
+    pullPolicy: IfNotPresent
+
+  persistence:
+    storageClassName: ""
+    accessModes:
+      - ReadWriteOnce
+    ## Per-replica data volume — sized for small production analytics
+    size: 200Gi
+    annotations: {}
+
+  resources:
+    requests:
+      cpu: "2"
+      memory: 8Gi
+    limits:
+      cpu: "4"
+      memory: 16Gi
+
+  podTemplate:
+    topologyZoneKey: topology.kubernetes.io/zone
+    nodeHostnameKey: kubernetes.io/hostname
+    labels: {}
+    annotations: {}
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+    topologySpreadConstraints: []
+    volumes: []
+
+  ## default user authentication
+  defaultUser:
+    ## Create a Secret from plaintext (dev only). Prefer existingSecret in prod.
+    password: ""
+    ## Existing Secret name containing the password key
+    existingSecret: ""
+    ## Key inside the secret (default: password)
+    existingSecretKey: password
+    ## password | password_sha256_hex | password_double_sha1_hex
+    passwordType: password
+    ## When true and no password/secret is set, generate a random password Secret
+    autoGenerate: true
+
+  ## Reference to KeeperCluster (auto-wired when keeper.enabled)
+  keeperClusterRef:
+    name: ""
+
+  ## Server / user settings (official operator settings block)
+  settings:
+    enableDatabaseSync: true
+    ## Server-level config (YAML → ClickHouse config)
+    extraConfig:
+      # Production-lean defaults for small business
+      max_concurrent_queries: 100
+      max_server_memory_usage_to_ram_ratio: 0.9
+      background_pool_size: 16
+      background_merges_mutations_concurrency_ratio: 2
+      mark_cache_size: 5368709120          # 5 GiB
+      uncompressed_cache_size: 8589934592  # 8 GiB
+      logger:
+        level: information
+        console: 1
+      # Prometheus metrics endpoint inside ClickHouse
+      prometheus:
+        endpoint: /metrics
+        port: 9363
+        metrics: true
+        events: true
+        asynchronous_metrics: true
+        status_info: true
+
+    extraUsersConfig: {}
+    # extraUsersConfig:
+    #   users:
+    #     app:
+    #       password_sha256_hex: "..."
+    #       profile: default
+    #       grants:
+    #         - query: "GRANT SELECT, INSERT ON app_db.*"
+    #   profiles:
+    #     readonly:
+    #       readonly: 1
+
+  additionalPorts:
+    - name: metrics
+      port: 9363
+
+  containerTemplate:
+    env: []
+    volumeMounts: []
+
+# ---------------------------------------------------------------------------
+# Optional in-cluster TLS (requires cert-manager + issuer)
+# ---------------------------------------------------------------------------
+tls:
+  enabled: false
+  ## When true, insecure ports are disabled
+  required: true
+  ## Create cert-manager Certificates (needs an Issuer/ClusterIssuer)
+  createCertificates: true
+  issuerRef:
+    name: ""
+    kind: Issuer   # or ClusterIssuer
+  clickhouse:
+    existingSecret: ""
+  keeper:
+    existingSecret: ""
+
+# ---------------------------------------------------------------------------
+# Optional external LoadBalancer for clients
+# ---------------------------------------------------------------------------
+loadBalancer:
+  enabled: false
+  annotations: {}
+  labels: {}
+  ## Prefer secure native port when TLS is required; otherwise native 9000
+  port: 9000
+  targetPort: 9000
+  loadBalancerSourceRanges: []
+  ## Selector override (defaults to app: <clickhouse-name>-clickhouse)
+  selector: {}

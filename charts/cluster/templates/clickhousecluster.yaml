@@ -1,0 +1,106 @@
+{{- if .Values.clickhouse.enabled }}
+{{- $keeperName := .Values.clickhouse.keeperClusterRef.name | default (include "cluster.keeperName" .) }}
+{{- if and .Values.keeper.enabled (not .Values.clickhouse.keeperClusterRef.name) }}
+{{- $keeperName = include "cluster.keeperName" . }}
+{{- end }}
+apiVersion: clickhouse.com/v1alpha1
+kind: ClickHouseCluster
+metadata:
+  name: {{ include "cluster.clickhouseName" . }}
+  labels:
+    {{- include "cluster.labels" . | nindent 4 }}
+    app.kubernetes.io/component: clickhouse
+spec:
+  replicas: {{ .Values.clickhouse.replicas }}
+  shards: {{ .Values.clickhouse.shards }}
+  keeperClusterRef:
+    name: {{ $keeperName | quote }}
+  dataVolumeClaimSpec:
+    {{- with .Values.clickhouse.persistence.storageClassName }}
+    storageClassName: {{ . | quote }}
+    {{- end }}
+    accessModes:
+      {{- toYaml .Values.clickhouse.persistence.accessModes | nindent 6 }}
+    resources:
+      requests:
+        storage: {{ .Values.clickhouse.persistence.size | quote }}
+  containerTemplate:
+    image:
+      repository: {{ .Values.clickhouse.image.repository | quote }}
+      tag: {{ .Values.clickhouse.image.tag | quote }}
+    imagePullPolicy: {{ .Values.clickhouse.image.pullPolicy }}
+    resources:
+      {{- toYaml .Values.clickhouse.resources | nindent 6 }}
+    {{- with .Values.clickhouse.containerTemplate.env }}
+    env:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    {{- with .Values.clickhouse.containerTemplate.volumeMounts }}
+    volumeMounts:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+  podTemplate:
+    {{- with .Values.clickhouse.podTemplate.topologyZoneKey }}
+    topologyZoneKey: {{ . | quote }}
+    {{- end }}
+    {{- with .Values.clickhouse.podTemplate.nodeHostnameKey }}
+    nodeHostnameKey: {{ . | quote }}
+    {{- end }}
+    {{- with .Values.clickhouse.podTemplate.labels }}
+    labels:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    {{- with .Values.clickhouse.podTemplate.annotations }}
+    annotations:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    {{- with .Values.clickhouse.podTemplate.nodeSelector }}
+    nodeSelector:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    {{- with .Values.clickhouse.podTemplate.tolerations }}
+    tolerations:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    {{- with .Values.clickhouse.podTemplate.affinity }}
+    affinity:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    {{- with .Values.clickhouse.podTemplate.topologySpreadConstraints }}
+    topologySpreadConstraints:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    {{- with .Values.clickhouse.podTemplate.volumes }}
+    volumes:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+  {{- with .Values.clickhouse.additionalPorts }}
+  additionalPorts:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  settings:
+    enableDatabaseSync: {{ .Values.clickhouse.settings.enableDatabaseSync }}
+    defaultUserPassword:
+      passwordType: {{ .Values.clickhouse.defaultUser.passwordType | quote }}
+      secret:
+        name: {{ include "cluster.passwordSecretName" . | quote }}
+        key: {{ .Values.clickhouse.defaultUser.existingSecretKey | default "password" | quote }}
+    {{- if .Values.tls.enabled }}
+    tls:
+      enabled: true
+      required: {{ .Values.tls.required }}
+      serverCertSecret:
+        name: {{ include "cluster.clickhouseTlsSecretName" . | quote }}
+      caBundle:
+        name: {{ include "cluster.clickhouseTlsSecretName" . | quote }}
+        key: ca.crt
+    {{- end }}
+    {{- with .Values.clickhouse.settings.extraConfig }}
+    extraConfig:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    {{- with .Values.clickhouse.settings.extraUsersConfig }}
+    extraUsersConfig:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+{{- end }}

@@ -1,0 +1,52 @@
+apiVersion: v2
+name: clickhouse-aio
+description: >
+  Production-oriented all-in-one Helm chart for ClickHouse on Kubernetes.
+  Bundles the official ClickHouse Operator and a local cluster subchart that
+  deploys ClickHouseKeeper + a replicated ClickHouseCluster (small-business size).
+type: application
+version: 0.1.0
+appVersion: "25.8"
+kubeVersion: ">= 1.28.0-0"
+home: https://github.com/ClickHouse/clickhouse-operator
+keywords:
+  - clickhouse
+  - clickhouse-keeper
+  - operator
+  - analytics
+  - olap
+maintainers:
+  - name: clickhouse-aio
+sources:
+  - https://github.com/ClickHouse/clickhouse-operator
+  - https://clickhouse.com/docs/clickhouse-operator/overview
+  - https://github.com/Altinity/helm-charts/tree/main/charts/clickhouse
+annotations:
+  # Altinity's clickhouse chart targets the Altinity operator (CHI/CHK CRDs).
+  # This chart uses the official ClickHouse Inc operator (ClickHouseCluster /
+  # KeeperCluster CRDs) instead. Sizing and production patterns are inspired by
+  # the Altinity chart defaults for small production deployments.
+  artifacthub.io/operator: "true"
+  artifacthub.io/category: database
+  artifacthub.io/links: |
+    - name: Official Operator Blog
+      url: https://clickhouse.com/blog/clickhouse-kubernetes-operator
+    - name: Official Operator Docs
+      url: https://clickhouse.com/docs/clickhouse-operator/overview
+    - name: Altinity Chart (reference)
+      url: https://github.com/Altinity/helm-charts/tree/main/charts/clickhouse
+
+dependencies:
+  # Official ClickHouse Kubernetes Operator (ClickHouse Inc)
+  # OCI: oci://ghcr.io/clickhouse/clickhouse-operator-helm
+  - name: clickhouse-operator-helm
+    version: "0.0.7"
+    repository: "oci://ghcr.io/clickhouse"
+    alias: operator
+    condition: operator.enabled
+
+  # Local subchart: KeeperCluster + ClickHouseCluster CRs
+  - name: cluster
+    version: "0.1.0"
+    repository: "file://charts/cluster"
+    condition: cluster.enabled

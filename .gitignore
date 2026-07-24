@@ -1,0 +1,20 @@
+# Helm
+charts/*.tgz
+*.tgz
+# Dependency charts downloaded into charts/ (keep local cluster/)
+# Official operator package is fetched via helm dependency update
+!charts/cluster/
+!charts/cluster/**
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# Secrets / local overrides
+secrets.yaml
+*-secrets.yaml
+.env
+.env.*

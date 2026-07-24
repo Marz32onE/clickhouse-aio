@@ -1,0 +1,73 @@
+{{- if .Values.keeper.enabled }}
+apiVersion: clickhouse.com/v1alpha1
+kind: KeeperCluster
+metadata:
+  name: {{ include "cluster.keeperName" . }}
+  labels:
+    {{- include "cluster.labels" . | nindent 4 }}
+    app.kubernetes.io/component: keeper
+spec:
+  replicas: {{ .Values.keeper.replicas }}
+  dataVolumeClaimSpec:
+    {{- with .Values.keeper.persistence.storageClassName }}
+    storageClassName: {{ . | quote }}
+    {{- end }}
+    accessModes:
+      {{- toYaml .Values.keeper.persistence.accessModes | nindent 6 }}
+    resources:
+      requests:
+        storage: {{ .Values.keeper.persistence.size | quote }}
+    {{- with .Values.keeper.persistence.annotations }}
+    # PVC annotations are applied via pod/volume templates when supported
+    {{- end }}
+  containerTemplate:
+    image:
+      repository: {{ .Values.keeper.image.repository | quote }}
+      tag: {{ .Values.keeper.image.tag | quote }}
+    imagePullPolicy: {{ .Values.keeper.image.pullPolicy }}
+    resources:
+      {{- toYaml .Values.keeper.resources | nindent 6 }}
+  podTemplate:
+    {{- with .Values.keeper.podTemplate.topologyZoneKey }}
+    topologyZoneKey: {{ . | quote }}
+    {{- end }}
+    {{- with .Values.keeper.podTemplate.nodeHostnameKey }}
+    nodeHostnameKey: {{ . | quote }}
+    {{- end }}
+    {{- with .Values.keeper.podTemplate.labels }}
+    labels:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    {{- with .Values.keeper.podTemplate.annotations }}
+    annotations:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    {{- with .Values.keeper.podTemplate.nodeSelector }}
+    nodeSelector:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    {{- with .Values.keeper.podTemplate.tolerations }}
+    tolerations:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    {{- with .Values.keeper.podTemplate.affinity }}
+    affinity:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    {{- with .Values.keeper.podTemplate.topologySpreadConstraints }}
+    topologySpreadConstraints:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+  {{- $settings := deepCopy (.Values.keeper.settings | default dict) }}
+  {{- if .Values.tls.enabled }}
+  {{- $_ := set $settings "tls" (dict
+        "enabled" true
+        "required" .Values.tls.required
+        "serverCertSecret" (dict "name" (include "cluster.keeperTlsSecretName" .))
+      ) }}
+  {{- end }}
+  {{- if $settings }}
+  settings:
+    {{- toYaml $settings | nindent 4 }}
+  {{- end }}
+{{- end }}
