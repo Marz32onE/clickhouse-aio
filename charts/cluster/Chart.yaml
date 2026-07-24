@@ -6,7 +6,7 @@ description: >
   (clickhouse.com/v1alpha1).
 type: application
 version: 0.1.0
-appVersion: "25.8"
+appVersion: "26.3"
 keywords:
   - clickhouse
   - clickhouse-keeper

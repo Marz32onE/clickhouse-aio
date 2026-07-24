@@ -20,7 +20,7 @@ keeper:
 
   image:
     repository: clickhouse/clickhouse-keeper
-    tag: "25.8"
+    tag: "26.3"
     pullPolicy: IfNotPresent
 
   persistence:
@@ -69,7 +69,7 @@ clickhouse:
 
   image:
     repository: clickhouse/clickhouse-server
-    tag: "25.8"
+    tag: "26.3"
     pullPolicy: IfNotPresent
 
   persistence:

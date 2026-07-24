@@ -94,7 +94,7 @@ cluster:
     replicas: 3
     image:
       repository: clickhouse/clickhouse-keeper
-      tag: "25.8"
+      tag: "26.3"
       pullPolicy: IfNotPresent
     persistence:
       ## Set to your CSI class (e.g. gp3, premium-rwo, local-path for lab)
@@ -122,7 +122,7 @@ cluster:
     shards: 1
     image:
       repository: clickhouse/clickhouse-server
-      tag: "25.8"
+      tag: "26.3"
       pullPolicy: IfNotPresent
     persistence:
       storageClassName: ""

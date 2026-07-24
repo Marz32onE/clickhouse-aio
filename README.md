@@ -53,7 +53,7 @@ Total rough floor: **~4.5 CPU / ~18 Gi RAM / ~440 Gi storage** (plus headroom fo
 ```bash
 helm install cert-manager oci://quay.io/jetstack/charts/cert-manager \
   --namespace cert-manager --create-namespace \
-  --set crds.enabled=true --version v1.19.2
+  --set crds.enabled=true --version v1.21.0
 ```
 
 4. A **StorageClass** suitable for databases (SSD, expandable). Set:
