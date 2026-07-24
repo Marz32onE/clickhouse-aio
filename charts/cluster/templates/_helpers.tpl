@@ -141,3 +141,15 @@ ClickHouse default-user secret)
 {{- .Values.clickhouse.defaultUser.existingSecretKey | default "password" }}
 {{- end }}
 {{- end }}
+
+{{/*
+ArgoCD ordering annotations: cluster resources sync in a later wave than the
+operator (un-annotated = wave 0), and dry-run is skipped while the CRDs the
+operator ships are not registered yet.
+*/}}
+{{- define "cluster.argocdAnnotations" -}}
+{{- if .Values.argocd.enabled }}
+argocd.argoproj.io/sync-wave: {{ .Values.argocd.syncWave | quote }}
+argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+{{- end }}
+{{- end }}

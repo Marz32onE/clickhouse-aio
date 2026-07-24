@@ -6,6 +6,10 @@ metadata:
   labels:
     {{- include "cluster.labels" . | nindent 4 }}
     app.kubernetes.io/component: rotel
+  {{- with include "cluster.argocdAnnotations" . }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
 spec:
   replicas: {{ .Values.rotel.replicas }}
   selector:

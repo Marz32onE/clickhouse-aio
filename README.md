@@ -137,6 +137,84 @@ kubectl exec -it -n clickhouse <clickhouse-pod> -- clickhouse-client
 
 Full knobs: `values.yaml` and `charts/cluster/values.yaml`.
 
+### Deploying with ArgoCD
+
+One Application can install operator + cluster in order. Enable
+`cluster.argocd.enabled`: cluster resources get
+`argocd.argoproj.io/sync-wave: "1"` (operator resources stay wave 0) plus
+`SkipDryRunOnMissingResource=true`, so ArgoCD deploys the operator, waits for
+it to be healthy, then syncs the CRs. The rotel DDL Job carries Helm
+`post-install/post-upgrade` hooks, which ArgoCD runs as a PostSync hook.
+
+```yaml
+apiVersion: argoproj.io/v1beta1
+kind: Application
+metadata:
+  name: clickhouse-aio
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/Marz32onE/clickhouse-aio
+    targetRevision: main
+    path: .
+    helm:
+      values: |
+        cluster:
+          argocd:
+            enabled: true
+          clickhouse:
+            defaultUser:
+              existingSecret: ch-default-password   # create it out-of-band
+              autoGenerate: false
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: clickhouse
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true    # operator CRDs exceed client-side apply limits
+    retry:
+      limit: 5
+      backoff: {duration: 20s, factor: 2, maxDuration: 3m}
+```
+
+Notes:
+- **Password must come from an existing Secret** (or a fixed value). ArgoCD
+  renders manifests without cluster access, so the chart's lookup-based
+  auto-generation would rotate the password every sync — the chart fails fast
+  if you try.
+- For accurate Application health (waves gate on it), register health checks
+  for the CRs in `argocd-cm`:
+
+```yaml
+resource.customizations.health.clickhouse.com_ClickHouseCluster: |
+  hs = {}
+  if obj.status ~= nil and obj.status.conditions ~= nil then
+    for _, c in ipairs(obj.status.conditions) do
+      if c.type == "Healthy" and c.status == "True" then
+        hs.status = "Healthy"; hs.message = "all shards ready"; return hs
+      end
+    end
+  end
+  hs.status = "Progressing"; hs.message = "waiting for replicas"
+  return hs
+resource.customizations.health.clickhouse.com_KeeperCluster: |
+  hs = {}
+  if obj.status ~= nil and obj.status.conditions ~= nil then
+    for _, c in ipairs(obj.status.conditions) do
+      if c.type == "Healthy" and c.status == "True" then
+        hs.status = "Healthy"; hs.message = "keeper ready"; return hs
+      end
+    end
+  end
+  hs.status = "Progressing"; hs.message = "waiting for quorum"
+  return hs
+```
+
 ### Offline / air-gapped install
 
 The operator chart is **vendored unpacked** at `charts/clickhouse-operator-helm/`

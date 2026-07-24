@@ -10,6 +10,10 @@ metadata:
   labels:
     {{- include "cluster.labels" . | nindent 4 }}
     app.kubernetes.io/component: clickhouse
+  {{- with include "cluster.argocdAnnotations" . }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
 spec:
   replicas: {{ .Values.clickhouse.replicas }}
   shards: {{ .Values.clickhouse.shards }}

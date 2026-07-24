@@ -6,7 +6,11 @@ metadata:
   labels:
     {{- include "cluster.labels" . | nindent 4 }}
     app.kubernetes.io/component: rotel
-  {{- with .Values.rotel.service.annotations }}
+  {{- $svcAnnotations := merge (dict) (.Values.rotel.service.annotations | default dict) }}
+  {{- if .Values.argocd.enabled }}
+  {{- $_ := set $svcAnnotations "argocd.argoproj.io/sync-wave" .Values.argocd.syncWave }}
+  {{- end }}
+  {{- with $svcAnnotations }}
   annotations:
     {{- toYaml . | nindent 4 }}
   {{- end }}

@@ -13,6 +13,10 @@ metadata:
   labels:
     {{- include "cluster.labels" . | nindent 4 }}
     app.kubernetes.io/component: keeper-tls
+  {{- with include "cluster.argocdAnnotations" . }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
 spec:
   secretName: {{ include "cluster.keeperTlsSecretName" . }}
   issuerRef:
@@ -32,6 +36,10 @@ metadata:
   labels:
     {{- include "cluster.labels" . | nindent 4 }}
     app.kubernetes.io/component: clickhouse-tls
+  {{- with include "cluster.argocdAnnotations" . }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
 spec:
   secretName: {{ include "cluster.clickhouseTlsSecretName" . }}
   issuerRef:
