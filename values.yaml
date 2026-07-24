@@ -171,6 +171,20 @@ cluster:
     ## do not add it here (validation webhook rejects it).
     additionalPorts: []
 
+  # ---- Rotel OTLP collector (traces/logs → ClickHouse) ----------------------
+  rotel:
+    enabled: true
+    replicas: 1
+    telemetry:
+      traces: true
+      logs: true
+      metrics: false
+    exporter:
+      ## HA profile (2 replicas): replicate otel tables across the cluster
+      engine: ReplicatedMergeTree
+      cluster: default
+      ttl: 168h
+
   # ---- TLS (optional; needs cert-manager Issuer) ----------------------------
   tls:
     enabled: false

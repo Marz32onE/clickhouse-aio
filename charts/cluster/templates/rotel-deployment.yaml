@@ -1,0 +1,105 @@
+{{- if .Values.rotel.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "cluster.rotelName" . }}
+  labels:
+    {{- include "cluster.labels" . | nindent 4 }}
+    app.kubernetes.io/component: rotel
+spec:
+  replicas: {{ .Values.rotel.replicas }}
+  selector:
+    matchLabels:
+      {{- include "cluster.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: rotel
+  template:
+    metadata:
+      labels:
+        {{- include "cluster.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: rotel
+        {{- with .Values.rotel.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.rotel.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      containers:
+        - name: rotel
+          image: "{{ .Values.rotel.image.repository }}:{{ .Values.rotel.image.tag }}"
+          imagePullPolicy: {{ .Values.rotel.image.pullPolicy }}
+          # Image entrypoint is `rotel start --otlp-grpc-endpoint 0.0.0.0:4317
+          # --otlp-http-endpoint 0.0.0.0:4318`; args are appended options.
+          {{- $args := list }}
+          {{- if not .Values.rotel.telemetry.traces }}
+          {{- $args = append $args "--otlp-receiver-traces-disabled" }}
+          {{- end }}
+          {{- if not .Values.rotel.telemetry.logs }}
+          {{- $args = append $args "--otlp-receiver-logs-disabled" }}
+          {{- end }}
+          {{- if not .Values.rotel.telemetry.metrics }}
+          {{- $args = append $args "--otlp-receiver-metrics-disabled" }}
+          {{- end }}
+          {{- $args = concat $args (.Values.rotel.extraArgs | default list) }}
+          {{- with $args }}
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          env:
+            - name: ROTEL_EXPORTER
+              value: clickhouse
+            - name: ROTEL_CLICKHOUSE_EXPORTER_ENDPOINT
+              value: {{ include "cluster.rotelClickhouseEndpoint" . | quote }}
+            - name: ROTEL_CLICKHOUSE_EXPORTER_DATABASE
+              value: {{ .Values.rotel.exporter.database | quote }}
+            - name: ROTEL_CLICKHOUSE_EXPORTER_TABLE_PREFIX
+              value: {{ .Values.rotel.exporter.tablePrefix | quote }}
+            - name: ROTEL_CLICKHOUSE_EXPORTER_USER
+              value: {{ .Values.rotel.exporter.user | quote }}
+            - name: ROTEL_CLICKHOUSE_EXPORTER_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "cluster.rotelPasswordSecretName" . | quote }}
+                  key: {{ include "cluster.rotelPasswordSecretKey" . | quote }}
+            - name: ROTEL_CLICKHOUSE_EXPORTER_COMPRESSION
+              value: {{ .Values.rotel.exporter.compression | quote }}
+            - name: ROTEL_CLICKHOUSE_EXPORTER_ASYNC_INSERT
+              value: {{ .Values.rotel.exporter.asyncInsert | quote }}
+            {{- if .Values.rotel.exporter.enableJson }}
+            - name: ROTEL_CLICKHOUSE_EXPORTER_ENABLE_JSON
+              value: "true"
+            {{- end }}
+            {{- with .Values.rotel.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: otlp-grpc
+              containerPort: 4317
+            - name: otlp-http
+              containerPort: 4318
+          readinessProbe:
+            tcpSocket:
+              port: otlp-grpc
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: otlp-grpc
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          resources:
+            {{- toYaml .Values.rotel.resources | nindent 12 }}
+      {{- with .Values.rotel.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.rotel.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.rotel.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

@@ -37,6 +37,12 @@ Cluster
 
   Port-forward HTTP UI / client:
     kubectl port-forward -n {{ .Release.Namespace }} svc/<cluster-name>-clickhouse 8123:8123 9000:9000
+{{- if .Values.cluster.rotel.enabled }}
+
+  Rotel OTLP collector (traces/logs → ClickHouse, db "{{ .Values.cluster.rotel.exporter.database | default "otel" }}"):
+    OTLP/gRPC: <cluster-name>-rotel.{{ .Release.Namespace }}.svc:4317
+    OTLP/HTTP: <cluster-name>-rotel.{{ .Release.Namespace }}.svc:4318
+{{- end }}
 {{- end }}
 
 Sizing (this profile)

@@ -18,3 +18,7 @@ secrets.yaml
 *-secrets.yaml
 .env
 .env.*
+
+# Test artifacts
+.playwright-mcp/
+clickstack-*.png

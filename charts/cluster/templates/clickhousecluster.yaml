@@ -78,6 +78,16 @@ spec:
   additionalPorts:
     {{- toYaml . | nindent 4 }}
   {{- end }}
+  {{- with .Values.clickhouse.versionProbe.resources }}
+  versionProbeTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+            - name: version-probe
+              resources:
+                {{- toYaml . | nindent 16 }}
+  {{- end }}
   settings:
     enableDatabaseSync: {{ .Values.clickhouse.settings.enableDatabaseSync }}
     defaultUserPassword:

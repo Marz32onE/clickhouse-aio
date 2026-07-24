@@ -116,6 +116,18 @@ clickhouse:
   keeperClusterRef:
     name: ""
 
+  ## Version-detection Job the operator runs before each (re)deploy.
+  ## Operator default is 256Mi which OOMs with clickhouse-server >= 26.x
+  ## (clickhouse-local startup footprint grew). Bump via this override.
+  versionProbe:
+    resources:
+      requests:
+        cpu: 250m
+        memory: 512Mi
+      limits:
+        cpu: "1"
+        memory: 1Gi
+
   ## Server / user settings (official operator settings block)
   settings:
     enableDatabaseSync: true
@@ -153,6 +165,75 @@ clickhouse:
   containerTemplate:
     env: []
     volumeMounts: []
+
+# ---------------------------------------------------------------------------
+# Rotel — lightweight Rust OTLP collector writing traces/logs into ClickHouse
+# https://github.com/rotel-dev/rotel
+# Schema-compatible with the OpenTelemetry ClickHouse exporter (otel_traces …).
+# ---------------------------------------------------------------------------
+rotel:
+  enabled: false
+  replicas: 1
+
+  image:
+    repository: streamfold/rotel
+    tag: "v0.2.2"
+    pullPolicy: IfNotPresent
+
+  ## Companion image creating the otel_* table DDL (rotel does not auto-create)
+  ddlImage:
+    repository: streamfold/rotel-clickhouse-ddl
+    tag: "v0.2.2"
+    pullPolicy: IfNotPresent
+
+  ## Run a post-install/upgrade Job that creates database + tables
+  createSchema: true
+
+  ## Which OTLP signals to accept and store
+  telemetry:
+    traces: true
+    logs: true
+    metrics: false
+
+  exporter:
+    ## Default: http://<cluster>-clickhouse-headless.<ns>.svc.cluster.local:8123
+    endpoint: ""
+    database: otel
+    tablePrefix: otel
+    user: default
+    ## Reuse the ClickHouse default-user secret unless set
+    existingSecret: ""
+    existingSecretKey: password
+    compression: lz4
+    asyncInsert: true
+    ## ClickHouse JSON column type for attributes (needs recent ClickHouse)
+    enableJson: false
+    ## MergeTree for single replica; ReplicatedMergeTree + cluster for HA
+    engine: MergeTree
+    ## remote_servers cluster name for ON CLUSTER DDL (operator default: "default")
+    cluster: ""
+    ## Row TTL for otel tables ("0s" = keep forever)
+    ttl: 168h
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+  service:
+    type: ClusterIP
+    annotations: {}
+
+  podLabels: {}
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  extraArgs: []
+  extraEnv: []
 
 # ---------------------------------------------------------------------------
 # Optional in-cluster TLS (requires cert-manager + issuer)

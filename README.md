@@ -5,7 +5,7 @@ Production-oriented **all-in-one Helm chart** for ClickHouse on Kubernetes.
 | Subchart | Source | Role |
 |----------|--------|------|
 | **operator** | Official [`clickhouse-operator-helm`](https://clickhouse.com/blog/clickhouse-kubernetes-operator) (`oci://ghcr.io/clickhouse/clickhouse-operator-helm`) | Installs the ClickHouse Inc operator + CRDs |
-| **cluster** | Local (`charts/cluster`) | Deploys `KeeperCluster` + `ClickHouseCluster` CRs |
+| **cluster** | Local (`charts/cluster`) | Deploys `KeeperCluster` + `ClickHouseCluster` CRs, plus the [Rotel](https://github.com/rotel-dev/rotel) OTLP collector |
 
 Default profile targets a **small-business production** footprint: HA without over-sharding.
 
@@ -131,6 +131,9 @@ kubectl exec -it -n clickhouse <clickhouse-pod> -- clickhouse-client
 | `cluster.clickhouse.resources` | 2–4 CPU / 8–16Gi | Tune to node size |
 | `cluster.tls.enabled` | `false` | Enable with `values-tls.yaml` |
 | `cluster.loadBalancer.enabled` | `false` | External clients |
+| `cluster.rotel.enabled` | `true` | OTLP collector (traces/logs → ClickHouse) |
+| `cluster.rotel.exporter.engine` | `ReplicatedMergeTree` | `MergeTree` for single replica |
+| `cluster.rotel.exporter.ttl` | `168h` | otel table row TTL |
 
 Full knobs: `values.yaml` and `charts/cluster/values.yaml`.
 
@@ -147,6 +150,40 @@ helm upgrade --install ch-operator . -n clickhouse-operator-system --create-name
 helm upgrade --install ch-cluster . -n clickhouse --create-namespace \
   --set operator.enabled=false
 ```
+
+## OTLP ingestion (Rotel) + ClickStack UI
+
+The chart deploys [Rotel](https://github.com/rotel-dev/rotel), a lightweight Rust
+OTLP collector, writing traces/logs into ClickHouse with the standard
+OpenTelemetry ClickHouse-exporter schema (`otel.otel_traces`, `otel.otel_logs`).
+A post-install Job creates the schema via `rotel-clickhouse-ddl`
+(`ReplicatedMergeTree` + `ON CLUSTER default` by default — matches the operator's
+cluster/macros config).
+
+Point your apps / SDKs at:
+
+```
+OTLP/gRPC  <cluster-name>-rotel.<namespace>.svc:4317
+OTLP/HTTP  <cluster-name>-rotel.<namespace>.svc:4318
+```
+
+Notes:
+- Port `9363` is reserved by the operator for Prometheus metrics — the
+  validation webhook rejects it in `additionalPorts`, and no `prometheus`
+  entry is needed in `extraConfig`.
+- The operator's version-probe Job defaults to 256Mi and OOMs with
+  ClickHouse ≥ 26.x images; the chart bumps it via
+  `cluster.clickhouse.versionProbe.resources`.
+
+### Visualization
+
+ClickHouse **26.2+** embeds the ClickStack (HyperDX) UI in the server binary at
+`http://<clickhouse>:8123/clickstack` — auto-detects the `otel_*` tables, gives
+search, trace waterfalls, chart explorer, and service maps with zero extra
+components. No persistence for dashboards/alerts (browser-local state) — good
+for dev/small teams; for full ClickStack (alerts, saved dashboards, auth) run
+[HyperDX + MongoDB](https://clickhouse.com/docs/use-cases/observability/clickstack/deployment)
+against this cluster, or use Grafana with the ClickHouse datasource.
 
 ## Scaling path (when the business grows)
 

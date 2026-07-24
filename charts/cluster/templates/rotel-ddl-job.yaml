@@ -1,0 +1,102 @@
+{{- if and .Values.rotel.enabled .Values.rotel.createSchema }}
+{{- $chHost := include "cluster.clickhouseHost" . }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "cluster.rotelName" . }}-ddl
+  labels:
+    {{- include "cluster.labels" . | nindent 4 }}
+    app.kubernetes.io/component: rotel-ddl
+  annotations:
+    # Runs after install/upgrade; retried by the pod until ClickHouse is up.
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "1"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 20
+  activeDeadlineSeconds: 900
+  template:
+    metadata:
+      labels:
+        {{- include "cluster.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: rotel-ddl
+    spec:
+      restartPolicy: OnFailure
+      initContainers:
+        # Waits for ClickHouse and creates the target database.
+        - name: create-database
+          image: "{{ .Values.clickhouse.image.repository }}:{{ .Values.clickhouse.image.tag }}"
+          imagePullPolicy: {{ .Values.clickhouse.image.pullPolicy }}
+          env:
+            - name: CH_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "cluster.rotelPasswordSecretName" . | quote }}
+                  key: {{ include "cluster.rotelPasswordSecretKey" . | quote }}
+          command:
+            - /bin/bash
+            - -ec
+            - |
+              {{- if .Values.rotel.exporter.cluster }}
+              QUERY="CREATE DATABASE IF NOT EXISTS {{ .Values.rotel.exporter.database }} ON CLUSTER '{{ .Values.rotel.exporter.cluster }}'"
+              {{- else }}
+              QUERY="CREATE DATABASE IF NOT EXISTS {{ .Values.rotel.exporter.database }}"
+              {{- end }}
+              until clickhouse-client --host {{ $chHost }} \
+                  --user {{ .Values.rotel.exporter.user }} --password "$CH_PASSWORD" \
+                  --query "$QUERY"; do
+                echo "ClickHouse not ready yet; retrying in 5s"
+                sleep 5
+              done
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+      containers:
+        - name: clickhouse-ddl
+          image: "{{ .Values.rotel.ddlImage.repository }}:{{ .Values.rotel.ddlImage.tag }}"
+          imagePullPolicy: {{ .Values.rotel.ddlImage.pullPolicy }}
+          env:
+            - name: CH_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "cluster.rotelPasswordSecretName" . | quote }}
+                  key: {{ include "cluster.rotelPasswordSecretKey" . | quote }}
+          command:
+            - /bin/bash
+            - -ec
+            - |
+              exec /clickhouse-ddl create \
+                --endpoint {{ include "cluster.rotelClickhouseEndpoint" . | quote }} \
+                --database {{ .Values.rotel.exporter.database | quote }} \
+                --table-prefix {{ .Values.rotel.exporter.tablePrefix | quote }} \
+                --user {{ .Values.rotel.exporter.user | quote }} \
+                --password "$CH_PASSWORD" \
+                --engine {{ .Values.rotel.exporter.engine | quote }} \
+                {{- with .Values.rotel.exporter.cluster }}
+                --cluster {{ . | quote }} \
+                {{- end }}
+                {{- if .Values.rotel.telemetry.traces }}
+                --traces \
+                {{- end }}
+                {{- if .Values.rotel.telemetry.logs }}
+                --logs \
+                {{- end }}
+                {{- if .Values.rotel.telemetry.metrics }}
+                --metrics \
+                {{- end }}
+                {{- if .Values.rotel.exporter.enableJson }}
+                --enable-json \
+                {{- end }}
+                --ttl {{ .Values.rotel.exporter.ttl | quote }}
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+{{- end }}

@@ -96,3 +96,48 @@ TLS certificate secret names
 {{- printf "%s-keeper-tls" (include "cluster.keeperName" .) }}
 {{- end }}
 {{- end }}
+
+{{/*
+Rotel collector resource name
+*/}}
+{{- define "cluster.rotelName" -}}
+{{- printf "%s-rotel" (include "cluster.clusterName" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{/*
+ClickHouse service host the operator creates for the cluster
+*/}}
+{{- define "cluster.clickhouseHost" -}}
+{{- printf "%s-clickhouse-headless.%s.svc.cluster.local" (include "cluster.clickhouseName" .) .Release.Namespace }}
+{{- end }}
+
+{{/*
+HTTP endpoint rotel uses to reach ClickHouse (override via rotel.exporter.endpoint)
+*/}}
+{{- define "cluster.rotelClickhouseEndpoint" -}}
+{{- if .Values.rotel.exporter.endpoint }}
+{{- .Values.rotel.exporter.endpoint }}
+{{- else }}
+{{- printf "http://%s:8123" (include "cluster.clickhouseHost" .) }}
+{{- end }}
+{{- end }}
+
+{{/*
+Secret holding the password rotel authenticates with (defaults to the
+ClickHouse default-user secret)
+*/}}
+{{- define "cluster.rotelPasswordSecretName" -}}
+{{- if .Values.rotel.exporter.existingSecret }}
+{{- .Values.rotel.exporter.existingSecret }}
+{{- else }}
+{{- include "cluster.passwordSecretName" . }}
+{{- end }}
+{{- end }}
+
+{{- define "cluster.rotelPasswordSecretKey" -}}
+{{- if .Values.rotel.exporter.existingSecret }}
+{{- .Values.rotel.exporter.existingSecretKey | default "password" }}
+{{- else }}
+{{- .Values.clickhouse.defaultUser.existingSecretKey | default "password" }}
+{{- end }}
+{{- end }}
