@@ -131,14 +131,8 @@ clickhouse:
       logger:
         level: information
         console: 1
-      # Prometheus metrics endpoint inside ClickHouse
-      prometheus:
-        endpoint: /metrics
-        port: 9363
-        metrics: true
-        events: true
-        asynchronous_metrics: true
-        status_info: true
+      # Prometheus metrics need no config here: the operator exposes
+      # port 9363 automatically (protocols.prometheus).
 
     extraUsersConfig: {}
     # extraUsersConfig:
@@ -152,9 +146,9 @@ clickhouse:
     #     readonly:
     #       readonly: 1
 
-  additionalPorts:
-    - name: metrics
-      port: 9363
+  ## Extra container ports. Port 9363 is reserved by the operator for
+  ## Prometheus metrics — the validation webhook rejects it here.
+  additionalPorts: []
 
   containerTemplate:
     env: []

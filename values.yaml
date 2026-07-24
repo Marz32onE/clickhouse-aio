@@ -162,19 +162,14 @@ cluster:
         logger:
           level: information
           console: 1
-        prometheus:
-          endpoint: /metrics
-          port: 9363
-          metrics: true
-          events: true
-          asynchronous_metrics: true
-          status_info: true
+        ## Prometheus metrics need no config here: the operator exposes
+        ## port 9363 automatically (protocols.prometheus).
       ## Optional app users (do not put plaintext passwords here)
       extraUsersConfig: {}
 
-    additionalPorts:
-      - name: metrics
-        port: 9363
+    ## Note: port 9363 is reserved by the operator for Prometheus metrics —
+    ## do not add it here (validation webhook rejects it).
+    additionalPorts: []
 
   # ---- TLS (optional; needs cert-manager Issuer) ----------------------------
   tls:

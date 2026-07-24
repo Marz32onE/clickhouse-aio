@@ -58,10 +58,3 @@ cluster:
         logger:
           level: information
           console: 1
-        prometheus:
-          endpoint: /metrics
-          port: 9363
-          metrics: true
-          events: true
-          asynchronous_metrics: true
-          status_info: true
