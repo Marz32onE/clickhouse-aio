@@ -1,10 +1,12 @@
 # Helm
-charts/*.tgz
+# Dependencies are vendored as unpacked directories under charts/ so offline
+# environments can install without reaching ghcr.io. Packaged .tgz files are
+# rebuilt locally by `helm dependency update` and never committed.
 *.tgz
-# Dependency charts downloaded into charts/ (keep local cluster/)
-# Official operator package is fetched via helm dependency update
 !charts/cluster/
 !charts/cluster/**
+!charts/clickhouse-operator-helm/
+!charts/clickhouse-operator-helm/**
 
 # OS / IDE
 .DS_Store

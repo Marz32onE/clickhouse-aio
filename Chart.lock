@@ -1,9 +1,9 @@
 dependencies:
 - name: clickhouse-operator-helm
-  repository: oci://ghcr.io/clickhouse
+  repository: file://charts/clickhouse-operator-helm
   version: 0.0.7
 - name: cluster
   repository: file://charts/cluster
   version: 0.1.0
-digest: sha256:0d1637de842d5637bbe4b8e032231db81575e175bedb817d7ff342a049a0f8c2
-generated: "2026-07-24T19:16:21.114757+08:00"
+digest: sha256:c73ade534715d4b4fc2c0e470f9536dc9850960099008db2b40d2e1edf437842
+generated: "2026-07-24T22:07:48.485231+08:00"

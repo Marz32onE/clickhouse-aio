@@ -137,6 +137,32 @@ kubectl exec -it -n clickhouse <clickhouse-pod> -- clickhouse-client
 
 Full knobs: `values.yaml` and `charts/cluster/values.yaml`.
 
+### Offline / air-gapped install
+
+The operator chart is **vendored unpacked** at `charts/clickhouse-operator-helm/`
+and referenced via `file://`, so `helm dependency update`, `lint`, and `install`
+need no registry access — clone and install.
+
+Still required in the air-gapped environment: the **container images**
+(mirror to your private registry and override the repositories):
+
+```
+clickhouse/clickhouse-server:26.3      clickhouse/clickhouse-keeper:26.3
+ghcr.io/clickhouse/clickhouse-operator:<operator tag>
+streamfold/rotel:v0.2.2                streamfold/rotel-clickhouse-ddl:v0.2.2
+quay.io/jetstack/cert-manager-*:v1.21.0
+```
+
+To refresh the vendored operator chart when a new release ships:
+
+```bash
+rm -rf charts/clickhouse-operator-helm
+helm pull oci://ghcr.io/clickhouse/clickhouse-operator-helm \
+  --version <new-version> --untar --untardir charts/
+# bump dependencies[].version in Chart.yaml, then:
+helm dependency update
+```
+
 ### Operator-only install
 
 ```bash

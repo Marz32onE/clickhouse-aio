@@ -37,11 +37,15 @@ annotations:
       url: https://github.com/Altinity/helm-charts/tree/main/charts/clickhouse
 
 dependencies:
-  # Official ClickHouse Kubernetes Operator (ClickHouse Inc)
-  # OCI: oci://ghcr.io/clickhouse/clickhouse-operator-helm
+  # Official ClickHouse Kubernetes Operator (ClickHouse Inc), vendored locally
+  # for offline/air-gapped installs. Upstream source:
+  #   oci://ghcr.io/clickhouse/clickhouse-operator-helm
+  # Refresh with:
+  #   helm pull oci://ghcr.io/clickhouse/clickhouse-operator-helm \
+  #     --version <new> --untar --untardir charts/
   - name: clickhouse-operator-helm
     version: "0.0.7"
-    repository: "oci://ghcr.io/clickhouse"
+    repository: "file://charts/clickhouse-operator-helm"
     alias: operator
     condition: operator.enabled
 
