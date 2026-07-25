@@ -95,18 +95,33 @@ helm upgrade --install ch-aio . -n clickhouse \
 
 ### Dev / local cluster
 
+The defaults size for production. On kind/k3d/minikube, shrink the request and
+drop to a single replica so the pods fit on one node:
+
 ```bash
-helm upgrade --install ch-aio . -n clickhouse --create-namespace -f values-dev.yaml
+helm upgrade --install ch-aio . -n clickhouse --create-namespace \
+  --set cluster.clickhouse.replicas=1 \
+  --set cluster.keeper.replicas=1 \
+  --set cluster.clickhouse.resources.requests.cpu=500m \
+  --set cluster.clickhouse.resources.requests.memory=1Gi \
+  --set cluster.clickhouse.persistence.size=20Gi \
+  --set cluster.keeper.persistence.size=5Gi \
+  --set cluster.clickhouse.defaultUser.password='devpass'
 ```
+
+`keeper.replicas` cannot be changed after the first successful deploy, so pick
+1 (local) or 3 (production) up front.
 
 ### Optional TLS
 
-Provide a cert-manager `Issuer` / `ClusterIssuer`, then:
+Mutual TLS for ClickHouse ↔ Keeper and client connections. Provide a
+cert-manager `Issuer` / `ClusterIssuer`, then:
 
 ```bash
 helm upgrade --install ch-aio . -n clickhouse \
-  -f values.yaml -f values-tls.yaml \
-  --set cluster.tls.issuerRef.name=local-issuer
+  --set cluster.tls.enabled=true \
+  --set cluster.tls.issuerRef.name=local-issuer \
+  --set cluster.tls.issuerRef.kind=Issuer
 ```
 
 ## Verify
@@ -125,12 +140,11 @@ kubectl exec -it -n clickhouse <clickhouse-pod> -- clickhouse-client
 |-----|---------|--------|
 | `operator.enabled` | `true` | Set `false` if operator is already cluster-wide |
 | `cluster.keeper.replicas` | `3` | **Odd only; do not change after first deploy** |
-| `cluster.clickhouse.replicas` | `2` | HA pair |
-| `cluster.clickhouse.shards` | `1` | Scale later if needed |
+| `cluster.clickhouse.replicas` | `3` | Each replica holds the full dataset |
+| `cluster.clickhouse.shards` | `1` | **Leave at 1** — see "Scaling path" |
 | `cluster.clickhouse.persistence.size` | `200Gi` | Per replica |
 | `cluster.clickhouse.resources` | 2–4 CPU / 8–16Gi | Tune to node size |
-| `cluster.tls.enabled` | `false` | Enable with `values-tls.yaml` |
-| `cluster.loadBalancer.enabled` | `false` | External clients |
+| `cluster.tls.enabled` | `false` | Needs cert-manager + an Issuer |
 | `cluster.rotel.enabled` | `true` | OTLP collector (traces/logs → ClickHouse) |
 | `cluster.rotel.exporter.engine` | `ReplicatedMergeTree` | `MergeTree` for single replica |
 | `cluster.rotel.exporter.databaseEngine` | `Replicated` | Keeps a new replica's table UUIDs aligned |
@@ -508,10 +522,42 @@ against this cluster, or use Grafana with the ClickHouse datasource.
 ## Scaling path (when the business grows)
 
 1. Raise `cluster.clickhouse.resources` (vertical)
-2. Raise `cluster.clickhouse.replicas` → `3`
+2. Raise `cluster.clickhouse.replicas` past the default `3`
 3. Grow PVC size (needs expandable StorageClass)
-4. Add shards (`cluster.clickhouse.shards`) for write/query scale-out
-5. Enable TLS + network policies + LoadBalancer source ranges
+4. Shorten `cluster.rotel.exporter.ttl` before adding capacity for data you do
+   not query
+5. Enable TLS + network policies
+6. Add shards — **only together with the Distributed-table work below**
+
+### Sharding is not a values-only change
+
+`cluster.clickhouse.shards` defaults to `1` and should stay there until the
+dataset genuinely outgrows one node. Raising it on its own produces wrong
+query results, silently:
+
+- The operator gives each shard its own Keeper path (`/clickhouse/tables/{uuid}/{shard}`),
+  so shards replicate independently and never exchange rows.
+- Rotel writes to the headless Service, whose DNS round-robins across every
+  pod, so rows land in whichever shard answered.
+- `otel.otel_traces` is a plain `ReplicatedMergeTree`. A query reads the local
+  table only, so it returns one shard's rows — no error, no warning.
+
+`rotel-clickhouse-ddl` cannot create the missing piece (`--engine` accepts only
+`MergeTree`, `ReplicatedMergeTree`, `Null`), so sharding means adding a
+`Distributed` layer to this chart:
+
+- Have the DDL Job build the local tables under a separate prefix and create
+  `otel.otel_traces` as `Distributed(default, otel, <local>, cityHash64(TraceId))`,
+  so the name rotel writes and ClickStack auto-detects is the correct one.
+  Hashing on `TraceId` keeps one trace's spans on a single shard.
+- Point the TTL Job at the local tables: `Distributed` rejects `MODIFY TTL`,
+  mutations and `OPTIMIZE`.
+- Extend `clickhouse.tenants.tables` to the Distributed table. Row policies do
+  apply through it, but a granted table with no filter returns every tenant's
+  rows — grants and filters must stay generated from one list.
+
+Adding the layer later is cheap: `RENAME TABLE` is a metadata-only operation,
+so the migration is a rename plus a `CREATE TABLE`, not a data copy.
 
 ## Uninstall
 

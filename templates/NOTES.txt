@@ -47,9 +47,10 @@ Cluster
 
 Sizing (this profile)
   Workload class : small-business production
-  Keeper         : 3 × (0.5–1 CPU, 1–2Gi RAM, 20Gi disk)
-  ClickHouse     : 2 × (2–4 CPU, 8–16Gi RAM, 200Gi disk), 1 shard
-  Scale next     : increase clickhouse.replicas → 3, then shards, then storageClass SSD
+  Keeper         : {{ .Values.cluster.keeper.replicas }} × ({{ .Values.cluster.keeper.resources.requests.cpu }}–{{ .Values.cluster.keeper.resources.limits.cpu }} CPU, {{ .Values.cluster.keeper.resources.requests.memory }}–{{ .Values.cluster.keeper.resources.limits.memory }} RAM, {{ .Values.cluster.keeper.persistence.size }} disk)
+  ClickHouse     : {{ .Values.cluster.clickhouse.replicas }} × ({{ .Values.cluster.clickhouse.resources.requests.cpu }}–{{ .Values.cluster.clickhouse.resources.limits.cpu }} CPU, {{ .Values.cluster.clickhouse.resources.requests.memory }}–{{ .Values.cluster.clickhouse.resources.limits.memory }} RAM, {{ .Values.cluster.clickhouse.persistence.size }} disk), {{ .Values.cluster.clickhouse.shards }} shard
+  Scale next     : raise clickhouse.resources, then replicas, then PVC size.
+                   Sharding needs a Distributed table first — see the README.
 
 Notes
   • Official operator CRDs: ClickHouseCluster / KeeperCluster (clickhouse.com/v1alpha1)

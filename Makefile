@@ -3,7 +3,7 @@ RELEASE ?= ch-aio
 NAMESPACE ?= clickhouse
 VALUES ?= values.yaml
 
-.PHONY: deps lint template template-dev package install install-dev uninstall
+.PHONY: deps lint template package install install-operator install-cluster uninstall
 
 deps:
 	helm dependency update
@@ -13,10 +13,6 @@ lint: deps
 
 template: deps
 	helm template $(RELEASE) . -n $(NAMESPACE) -f $(VALUES) \
-		--set cluster.clickhouse.defaultUser.password=changeme
-
-template-dev: deps
-	helm template $(RELEASE) . -n $(NAMESPACE) -f values-dev.yaml \
 		--set cluster.clickhouse.defaultUser.password=changeme
 
 package: deps lint
@@ -38,10 +34,6 @@ install: deps
 	@test -n "$(PASSWORD)" || (echo 'Set PASSWORD=... for default user'; exit 1)
 	helm upgrade --install $(RELEASE) . -n $(NAMESPACE) --create-namespace \
 		-f $(VALUES) --set cluster.clickhouse.defaultUser.password='$(PASSWORD)'
-
-install-dev: deps
-	helm upgrade --install $(RELEASE) . -n $(NAMESPACE) --create-namespace \
-		-f values-dev.yaml --set cluster.clickhouse.defaultUser.password='$(or $(PASSWORD),devpass)'
 
 uninstall:
 	helm uninstall $(RELEASE) -n $(NAMESPACE) || true

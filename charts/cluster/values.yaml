@@ -91,9 +91,10 @@ clickhouse:
   enabled: true
   ## Override ClickHouseCluster metadata.name (default: shared clusterName)
   name: ""
-  ## Replicas per shard (HA). 2 is enough for small production.
-  replicas: 2
-  ## Horizontal partitions. Keep 1 until you need more write/query scale.
+  ## Replicas per shard (HA). Every replica holds the full dataset.
+  replicas: 3
+  ## Horizontal partitions. Keep 1: the otel_* tables have no Distributed table
+  ## in front of them, so >1 shard makes each query see only one shard's rows.
   shards: 1
 
   image:
@@ -360,17 +361,3 @@ tls:
     existingSecret: ""
   keeper:
     existingSecret: ""
-
-# ---------------------------------------------------------------------------
-# Optional external LoadBalancer for clients
-# ---------------------------------------------------------------------------
-loadBalancer:
-  enabled: false
-  annotations: {}
-  labels: {}
-  ## Prefer secure native port when TLS is required; otherwise native 9000
-  port: 9000
-  targetPort: 9000
-  loadBalancerSourceRanges: []
-  ## Selector override (defaults to app: <clickhouse-name>-clickhouse)
-  selector: {}
