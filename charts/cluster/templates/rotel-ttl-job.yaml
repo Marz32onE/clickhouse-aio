@@ -1,6 +1,7 @@
 {{- if and .Values.rotel.enabled .Values.rotel.manageTtl }}
 {{- $chHost := include "cluster.clickhouseHost" . }}
 {{- $seconds := include "cluster.rotelTtlSeconds" . }}
+{{- $replicated := include "cluster.rotelDatabaseReplicated" . }}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -42,10 +43,17 @@ spec:
               DB={{ .Values.rotel.exporter.database | quote }}
               PREFIX={{ .Values.rotel.exporter.tablePrefix | quote }}
               SECONDS_TTL={{ $seconds | quote }}
+              {{- if $replicated }}
+              # The Replicated database engine puts the ALTER in its own DDL log
+              # for every member to replay. Adding ON CLUSTER on top would send
+              # each host a statement it is already going to receive.
+              ON_CLUSTER=""
+              {{- else }}
               {{- with .Values.rotel.exporter.cluster }}
               ON_CLUSTER="ON CLUSTER '{{ . }}'"
               {{- else }}
               ON_CLUSTER=""
+              {{- end }}
               {{- end }}
 
               ch() {

@@ -176,6 +176,33 @@ Usage: include "cluster.topologySpreadConstraints" (dict "podTemplate" .Values.<
 {{- end }}
 
 {{/*
+Whether the otel database uses the Replicated engine, as "true"/"" so callers
+can use `if`. Validates the pairing it depends on.
+*/}}
+{{- define "cluster.rotelDatabaseReplicated" -}}
+{{- $e := .Values.rotel.exporter.databaseEngine | default "Atomic" -}}
+{{- if not (has $e (list "Replicated" "Atomic")) -}}
+{{- fail (printf "rotel.exporter.databaseEngine %q: must be Replicated or Atomic" $e) -}}
+{{- end -}}
+{{- if eq $e "Replicated" -}}
+{{- if not .Values.rotel.exporter.cluster -}}
+{{- fail "rotel.exporter.databaseEngine=Replicated needs rotel.exporter.cluster set — every host has to join the database by name for the DDL log to reach it" -}}
+{{- end -}}
+{{- if ne .Values.rotel.exporter.engine "ReplicatedMergeTree" -}}
+{{- fail (printf "rotel.exporter.databaseEngine=Replicated with engine=%s: replicating DDL to hosts that each keep their own copy of the data is not replication. Use engine=ReplicatedMergeTree, or databaseEngine=Atomic for a single replica." .Values.rotel.exporter.engine) -}}
+{{- end -}}
+true
+{{- end -}}
+{{- end }}
+
+{{/*
+Keeper path holding the Replicated database's DDL log.
+*/}}
+{{- define "cluster.rotelDatabaseReplicaPath" -}}
+{{- .Values.rotel.exporter.databaseReplicaPath | default (printf "/clickhouse/databases/%s" .Values.rotel.exporter.database) -}}
+{{- end }}
+
+{{/*
 rotel.exporter.ttl as a whole number of seconds.
 
 The DDL tool only writes TTL at CREATE time, so the retention job re-applies it

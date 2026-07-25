@@ -294,8 +294,30 @@ rotel:
     enableJson: false
     ## MergeTree for single replica; ReplicatedMergeTree + cluster for HA
     engine: MergeTree
-    ## remote_servers cluster name for ON CLUSTER DDL (operator default: "default")
+    ## remote_servers cluster name (operator default: "default"). Required by
+    ## databaseEngine=Replicated, and used for ON CLUSTER DDL under Atomic.
     cluster: ""
+    ## Database engine.
+    ##
+    ## Replicated writes every DDL statement to a Keeper log that all members
+    ## replay, so a replica added later inherits the schema *including table
+    ## UUIDs*. That matters because the table path is
+    ## /clickhouse/tables/{uuid}/{shard}: under Atomic, a brand-new replica has
+    ## no tables until the DDL job next runs, and CREATE TABLE IF NOT EXISTS
+    ## then gives it a fresh UUID — a separate table that is not a replica of
+    ## the others, silently splitting writes. ON CLUSTER only aligns UUIDs when
+    ## every host creates the table in the same statement.
+    ##
+    ## Atomic is the plain local database, fine for a single replica. It is also
+    ## what installs created before this option existed use; switching an
+    ## existing database is not possible in place — see the README.
+    ##
+    ## Requires cluster to be set. Under Replicated the DDL tool and the TTL job
+    ## drop ON CLUSTER, which the database engine would otherwise double-execute.
+    databaseEngine: Replicated
+    ## Keeper path holding the database's DDL log. Empty derives
+    ## /clickhouse/databases/<database>.
+    databaseReplicaPath: ""
     ## Row TTL for otel tables ("0s" = keep forever). Accepts <number><s|m|h|d>.
     ## The DDL tool only writes TTL when it creates a table, so changing this on
     ## an existing install does nothing on its own — manageTtl below re-applies

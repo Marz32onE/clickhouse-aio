@@ -133,6 +133,7 @@ kubectl exec -it -n clickhouse <clickhouse-pod> -- clickhouse-client
 | `cluster.loadBalancer.enabled` | `false` | External clients |
 | `cluster.rotel.enabled` | `true` | OTLP collector (traces/logs → ClickHouse) |
 | `cluster.rotel.exporter.engine` | `ReplicatedMergeTree` | `MergeTree` for single replica |
+| `cluster.rotel.exporter.databaseEngine` | `Replicated` | Keeps a new replica's table UUIDs aligned |
 | `cluster.rotel.exporter.ttl` | `168h` | Retention; `<n><s\|m\|h\|d>`, `0s` = forever |
 | `cluster.rotel.manageTtl` | `true` | Re-apply `ttl` to existing tables on upgrade |
 | `operator.rbac.namespaced` | `true` | Role instead of ClusterRole |
@@ -144,6 +145,63 @@ kubectl exec -it -n clickhouse <clickhouse-pod> -- clickhouse-client
 | `cluster.*.podTemplate.topologySpreadConstraints` | `[]` | Escape hatch; replaces `spreadPolicy` |
 
 Full knobs: `values.yaml` and `charts/cluster/values.yaml`.
+
+### Why the otel database is Replicated
+
+`cluster.rotel.exporter.databaseEngine` defaults to `Replicated`, which is what
+makes adding a replica safe.
+
+The table path is `/clickhouse/tables/{uuid}/{shard}`, so two servers are
+replicas of one table only when they agree on its UUID. `ON CLUSTER` gives them
+a shared UUID *when they all run the same CREATE* — it does not backfill the
+original UUID later. Under an `Atomic` database a brand-new replica therefore
+starts empty, and the next `CREATE TABLE IF NOT EXISTS` run gives it a fresh
+UUID: a second table under a different Keeper path that the others never
+replicate to. Writes split silently, with both tables reporting healthy.
+
+The `Replicated` engine writes each DDL statement to a Keeper log that every
+member replays, so a new replica inherits the schema *with the original UUIDs*
+and starts replicating immediately. It is also the only thing the operator's
+`enableDatabaseSync` supports, and the same engine the operator gives its own
+`default` database.
+
+Consequences worth knowing:
+
+- `rotel.exporter.cluster` must be set. The `CREATE DATABASE` still runs
+  `ON CLUSTER` so every host joins; only the statements after it are replicated.
+- The DDL tool runs without `--cluster` and the TTL job without `ON CLUSTER`.
+  Both would otherwise hand each host a statement the database engine is
+  already going to deliver.
+- `engine` must be `ReplicatedMergeTree`. Replicating DDL to hosts that each
+  keep their own copy of the data is not replication, so the chart rejects the
+  combination.
+
+Check it landed with the CR's own condition:
+
+```bash
+kubectl get clickhousecluster <name> -o jsonpath='{.status.conditions[?(@.type=="SchemaInSync")]}'
+# ReplicasInSync / "All replicas are in sync"
+```
+
+**Migrating an existing install.** A database engine cannot be changed in place,
+and `CREATE DATABASE IF NOT EXISTS` keeps whatever is already there — so setting
+this on a running cluster does nothing on its own. The DDL job compares the two
+and warns in its log rather than failing the upgrade. To convert, copy the data
+out, drop the database on **every** replica, let the job recreate it, and copy
+back:
+
+```sql
+CREATE DATABASE otel_old ENGINE = Atomic;         -- on one replica
+CREATE TABLE otel_old.otel_traces AS otel.otel_traces;
+INSERT INTO otel_old.otel_traces SELECT * FROM otel.otel_traces;
+-- repeat per table, DROP DATABASE otel SYNC on every replica, helm upgrade,
+-- then INSERT INTO otel.otel_traces SELECT * FROM otel_old.otel_traces
+```
+
+If a replica already holds an `Atomic` database of that name — a reused volume
+from an earlier scale-out, say — the sync cannot proceed and the operator
+reports `SchemaInSync: False` with `DatabasesNotCreated`. Dropping the stale
+database on that replica lets the operator recreate it with the right engine.
 
 ### Retention (TTL)
 

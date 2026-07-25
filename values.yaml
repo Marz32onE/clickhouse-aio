@@ -217,6 +217,12 @@ cluster:
       ## HA profile (2 replicas): replicate otel tables across the cluster
       engine: ReplicatedMergeTree
       cluster: default
+      ## Replicated puts every DDL statement in a Keeper log all members replay,
+      ## so a replica added later inherits the schema with the same table UUIDs
+      ## and therefore actually replicates. Atomic leaves a new replica to have
+      ## its tables recreated under a fresh UUID, which silently splits writes.
+      ## Cannot be changed in place on an existing database — see the README.
+      databaseEngine: Replicated
       ## Retention for the otel tables, as <number><s|m|h|d> ("0s" = forever).
       ## Applied to existing tables on every upgrade via cluster.rotel.manageTtl.
       ttl: 168h

@@ -1,5 +1,6 @@
 {{- if and .Values.rotel.enabled .Values.rotel.createSchema }}
 {{- $chHost := include "cluster.clickhouseHost" . }}
+{{- $replicated := include "cluster.rotelDatabaseReplicated" . }}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -37,17 +38,41 @@ spec:
             - /bin/bash
             - -ec
             - |
-              {{- if .Values.rotel.exporter.cluster }}
-              QUERY="CREATE DATABASE IF NOT EXISTS {{ .Values.rotel.exporter.database }} ON CLUSTER '{{ .Values.rotel.exporter.cluster }}'"
+              DB={{ .Values.rotel.exporter.database | quote }}
+              {{- if $replicated }}
+              # ON CLUSTER even for the Replicated engine: each host has to run
+              # the CREATE to join the database. Only later DDL is replicated.
+              QUERY="CREATE DATABASE IF NOT EXISTS $DB ON CLUSTER '{{ .Values.rotel.exporter.cluster }}' ENGINE = Replicated('{{ include "cluster.rotelDatabaseReplicaPath" . }}', '{shard}', '{replica}')"
+              WANT="Replicated"
+              {{- else if .Values.rotel.exporter.cluster }}
+              QUERY="CREATE DATABASE IF NOT EXISTS $DB ON CLUSTER '{{ .Values.rotel.exporter.cluster }}'"
+              WANT="Atomic"
               {{- else }}
-              QUERY="CREATE DATABASE IF NOT EXISTS {{ .Values.rotel.exporter.database }}"
+              QUERY="CREATE DATABASE IF NOT EXISTS $DB"
+              WANT="Atomic"
               {{- end }}
-              until clickhouse-client --host {{ $chHost }} \
+
+              ch() {
+                clickhouse-client --host {{ $chHost }} \
                   --user {{ .Values.rotel.exporter.user }} --password "$CH_PASSWORD" \
-                  --query "$QUERY"; do
+                  --query "$1"
+              }
+
+              until ch "$QUERY"; do
                 echo "ClickHouse not ready yet; retrying in 5s"
                 sleep 5
               done
+
+              # CREATE DATABASE IF NOT EXISTS keeps whatever engine the database
+              # already has, so a value change would otherwise apply silently to
+              # nothing. An engine cannot be swapped in place — the README has
+              # the copy-and-switch migration.
+              HAVE=$(ch "SELECT engine FROM system.databases WHERE name = '$DB'")
+              if [ "$HAVE" != "$WANT" ]; then
+                echo "WARNING: database $DB has engine $HAVE but rotel.exporter.databaseEngine asks for $WANT."
+                echo "WARNING: the existing engine is kept. With Atomic, a replica added later"
+                echo "WARNING: gets tables under a fresh UUID that do not replicate. See the README."
+              fi
           resources:
             requests:
               cpu: 100m
@@ -76,8 +101,10 @@ spec:
                 --user {{ .Values.rotel.exporter.user | quote }} \
                 --password "$CH_PASSWORD" \
                 --engine {{ .Values.rotel.exporter.engine | quote }} \
+                {{- if not $replicated }}
                 {{- with .Values.rotel.exporter.cluster }}
                 --cluster {{ . | quote }} \
+                {{- end }}
                 {{- end }}
                 {{- if .Values.rotel.telemetry.traces }}
                 --traces \
