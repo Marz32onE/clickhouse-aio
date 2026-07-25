@@ -50,14 +50,33 @@ keeper:
       memory: 2Gi
 
   podTemplate:
-    ## Spread across AZs when the cluster has zone labels
-    topologyZoneKey: topology.kubernetes.io/zone
-    nodeHostnameKey: kubernetes.io/hostname
+    ## Domain replicas are balanced across. Node-level by default so it works on
+    ## clusters without zone labels; set "topology.kubernetes.io/zone" for AZ
+    ## spreading.
+    topologyZoneKey: kubernetes.io/hostname
+    ## How hard that spreading is enforced over topologyZoneKey:
+    ##   ScheduleAnyway  — best effort; replicas share a domain when there are
+    ##                     fewer domains than replicas
+    ##   DoNotSchedule   — strict; excess replicas stay Pending
+    ##   ""              — emit no spread constraint (operator default applies,
+    ##                     which is equivalent to DoNotSchedule)
+    spreadPolicy: ScheduleAnyway
+    ## Empty on purpose: a non-empty value makes the operator emit a *required*
+    ## PodAntiAffinity (one pod per node, excess pods stay Pending) that cannot
+    ## be relaxed later, because user `affinity` is appended to operator
+    ## defaults rather than replacing them. Set it only to enforce exclusive
+    ## node occupancy.
+    nodeHostnameKey: ""
     labels: {}
     annotations: {}
     nodeSelector: {}
     tolerations: []
     affinity: {}
+    ## Escape hatch: a non-empty list replaces whatever spreadPolicy would
+    ## generate. Entries merge into the operator defaults by topologyKey, so use
+    ## topologyZoneKey's value to adjust the generated constraint and any other
+    ## key to add one. Omit labelSelector on the former — the operator fills in
+    ## the pod labels; a constraint with an empty selector matches nothing.
     topologySpreadConstraints: []
 
   settings: {}
@@ -99,8 +118,10 @@ clickhouse:
       memory: 16Gi
 
   podTemplate:
-    topologyZoneKey: topology.kubernetes.io/zone
-    nodeHostnameKey: kubernetes.io/hostname
+    ## See the keeper.podTemplate comments above for what each field does.
+    topologyZoneKey: kubernetes.io/hostname
+    spreadPolicy: ScheduleAnyway
+    nodeHostnameKey: ""
     labels: {}
     annotations: {}
     nodeSelector: {}
@@ -156,6 +177,11 @@ clickhouse:
       # Prometheus metrics need no config here: the operator exposes
       # port 9363 automatically (protocols.prometheus).
 
+    ## Merged on top of the users generated from clickhouse.tenants below, so
+    ## an entry here with the same user name replaces the generated one.
+    ## Note the `grants` shape: a single key holding a list of query strings.
+    ## A list of {query: ...} maps renders as repeated <grants> XML elements and
+    ## ClickHouse honours only the first, silently dropping the rest.
     extraUsersConfig: {}
     # extraUsersConfig:
     #   users:
@@ -163,10 +189,52 @@ clickhouse:
     #       password_sha256_hex: "..."
     #       profile: default
     #       grants:
-    #         - query: "GRANT SELECT, INSERT ON app_db.*"
+    #         query:
+    #           - "GRANT SELECT, INSERT ON app_db.*"
     #   profiles:
     #     readonly:
     #       readonly: 1
+
+  ## ---------------------------------------------------------------------
+  ## Tenants: read-only users that can only see rows belonging to their own
+  ## Kubernetes namespaces, enforced by a ClickHouse row policy.
+  ##
+  ## The namespace has to be on the telemetry itself — rotel does not enrich
+  ## spans with Kubernetes metadata. Instrumented workloads should publish it,
+  ## e.g. via the downward API:
+  ##   env:
+  ##     - name: POD_NAMESPACE
+  ##       valueFrom: {fieldRef: {fieldPath: metadata.namespace}}
+  ##     - name: OTEL_RESOURCE_ATTRIBUTES
+  ##       value: k8s.namespace.name=$(POD_NAMESPACE)
+  ## Rows whose attribute is missing or unknown are visible to no tenant.
+  ## ---------------------------------------------------------------------
+  tenants:
+    ## Database holding the tables below. Defaults to rotel.exporter.database.
+    database: ""
+    ## ResourceAttributes key carrying the Kubernetes namespace.
+    namespaceAttribute: k8s.namespace.name
+    ## Tables tenants may read. Each one gets both the SELECT grant and the row
+    ## filter, so only add tables that have a ResourceAttributes column — a
+    ## granted table without a usable filter returns every tenant's rows.
+    ## otel_traces_trace_id_ts is deliberately absent: it holds only trace ids
+    ## and timestamps, so it cannot be filtered by namespace.
+    tables:
+      - otel_traces
+      - otel_logs
+    ## Each user gets a Secret named <cluster>-tenant-<name>-password with a
+    ## generated password unless existingSecret or password is set.
+    users: []
+    # users:
+    #   - name: team_a               # ClickHouse identifier: [A-Za-z_][A-Za-z0-9_]*
+    #     namespaces: [team-a, team-a-staging]
+    #     ## Optional: bring your own Secret instead of a generated one
+    #     existingSecret: ""
+    #     existingSecretKey: password
+    #     ## Optional: fixed password (prefer --set over committing it)
+    #     password: ""
+    #     ## Optional: profile granting more than read-only
+    #     profile: tenant_readonly
 
   ## Extra container ports. Port 9363 is reserved by the operator for
   ## Prometheus metrics — the validation webhook rejects it here.
@@ -199,6 +267,12 @@ rotel:
   ## Run a post-install/upgrade Job that creates database + tables
   createSchema: true
 
+  ## Run a post-install/upgrade Job that re-applies exporter.ttl to the existing
+  ## otel tables, making the value below effective on upgrades rather than only
+  ## at table-creation time. Reuses each table's own TTL expression, so a table
+  ## created with ttl=0s is skipped — it has none to modify.
+  manageTtl: true
+
   ## Which OTLP signals to accept and store
   telemetry:
     traces: true
@@ -222,7 +296,10 @@ rotel:
     engine: MergeTree
     ## remote_servers cluster name for ON CLUSTER DDL (operator default: "default")
     cluster: ""
-    ## Row TTL for otel tables ("0s" = keep forever)
+    ## Row TTL for otel tables ("0s" = keep forever). Accepts <number><s|m|h|d>.
+    ## The DDL tool only writes TTL when it creates a table, so changing this on
+    ## an existing install does nothing on its own — manageTtl below re-applies
+    ## it with ALTER ... MODIFY TTL after every upgrade.
     ttl: 168h
 
   resources:

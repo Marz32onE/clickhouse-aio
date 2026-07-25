@@ -30,10 +30,8 @@ cluster:
       limits:
         cpu: 500m
         memory: 512Mi
-    podTemplate:
-      # Single-node clusters rarely have zone labels
-      topologyZoneKey: ""
-      nodeHostnameKey: kubernetes.io/hostname
+    # podTemplate omitted: chart defaults already spread by node, best-effort,
+    # so replicas fit on a single-node kind/k3d/minikube cluster.
 
   clickhouse:
     replicas: 1
@@ -47,9 +45,6 @@ cluster:
       limits:
         cpu: "2"
         memory: 4Gi
-    podTemplate:
-      topologyZoneKey: ""
-      nodeHostnameKey: kubernetes.io/hostname
     settings:
       extraConfig:
         max_concurrent_queries: 50

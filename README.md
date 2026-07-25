@@ -133,9 +133,164 @@ kubectl exec -it -n clickhouse <clickhouse-pod> -- clickhouse-client
 | `cluster.loadBalancer.enabled` | `false` | External clients |
 | `cluster.rotel.enabled` | `true` | OTLP collector (traces/logs → ClickHouse) |
 | `cluster.rotel.exporter.engine` | `ReplicatedMergeTree` | `MergeTree` for single replica |
-| `cluster.rotel.exporter.ttl` | `168h` | otel table row TTL |
+| `cluster.rotel.exporter.ttl` | `168h` | Retention; `<n><s\|m\|h\|d>`, `0s` = forever |
+| `cluster.rotel.manageTtl` | `true` | Re-apply `ttl` to existing tables on upgrade |
+| `operator.rbac.namespaced` | `true` | Role instead of ClusterRole |
+| `operator.controller.watchNamespaces` | `[clickhouse]` | Must equal the release namespace |
+| `cluster.clickhouse.tenants.users` | `[]` | Per-namespace read-only users |
+| `cluster.*.podTemplate.topologyZoneKey` | `kubernetes.io/hostname` | Domain replicas spread across |
+| `cluster.*.podTemplate.spreadPolicy` | `ScheduleAnyway` | Or `DoNotSchedule` / `""` |
+| `cluster.*.podTemplate.nodeHostnameKey` | `""` | Non-empty = strict one pod per node |
+| `cluster.*.podTemplate.topologySpreadConstraints` | `[]` | Escape hatch; replaces `spreadPolicy` |
 
 Full knobs: `values.yaml` and `charts/cluster/values.yaml`.
+
+### Retention (TTL)
+
+Set `cluster.rotel.exporter.ttl` — a number plus `s`, `m`, `h` or `d`, with
+`0s` meaning keep forever:
+
+```bash
+helm upgrade ch-aio . -n clickhouse --set cluster.rotel.exporter.ttl=30d
+```
+
+The DDL tool only writes TTL when it **creates** a table, so on an existing
+install that value alone changes nothing. `cluster.rotel.manageTtl` (default on)
+adds a post-upgrade Job that re-applies it with `ALTER TABLE ... MODIFY TTL`,
+which is what makes the value adjustable after the first install.
+
+The job reuses each table's own TTL expression — `Timestamp` for spans,
+`TimestampTime` for logs, `Start` for the trace-id index — so it stays correct
+if the DDL tool's schema changes, and falls back to those columns by table
+suffix when a table currently has no TTL (otherwise `0s` would be a one-way
+door). It then reads the result back from every replica through
+`clusterAllReplicas` and exits non-zero on a mismatch, so a replica that was
+restarting during the upgrade is picked up by the Job's retry rather than
+silently left on the old retention.
+
+All three otel tables carry `ttl_only_drop_parts = 1`: whole parts are dropped
+once every row in them has expired, instead of rewriting parts to delete rows.
+Retention is therefore granular to the partition, which is one day.
+
+To retain traces and logs for different periods, turn `manageTtl` off and run
+the `ALTER TABLE ... MODIFY TTL` statements yourself — the chart drives a single
+value for every table.
+
+### Operator RBAC scope
+
+`operator.rbac.namespaced: true` gives the operator a Role/RoleBinding in its
+own namespace instead of a ClusterRole, so it can only touch StatefulSets,
+Secrets, PVCs and custom resources there. Two consequences:
+
+- **The cluster must live in the operator's namespace.** Both `make
+  install-operator` and `make install-cluster` use `NAMESPACE` for exactly this
+  reason.
+- **`controller.watchNamespaces` must list that namespace.** An empty list means
+  cluster-wide, which a namespaced Role cannot serve — the operator reconciles
+  nothing and only logs permission errors. The chart fails to render on that
+  mismatch rather than letting it reach the cluster.
+
+Two ClusterRoles remain when `metrics.secure` is on; they cover only the
+`TokenReview`/`SubjectAccessReview` calls that authenticate metrics scrapes.
+
+To manage clusters across several namespaces, set `operator.rbac.namespaced:
+false` and either list them in `watchNamespaces` or leave it empty for
+cluster-wide.
+
+### Per-namespace read-only users
+
+`cluster.clickhouse.tenants` generates ClickHouse users that can only read rows
+whose telemetry carries their own Kubernetes namespace:
+
+```yaml
+cluster:
+  clickhouse:
+    tenants:
+      users:
+        - name: team_a                       # ClickHouse identifier
+          namespaces: [team-a, team-a-staging]
+        - name: team_b
+          namespaces: [team-b]
+          existingSecret: team-b-ch-password  # else one is generated
+```
+
+Each user gets a `readonly` profile, a `SELECT` grant on the configured tables,
+and a row-policy filter on every one of them. The password is read from a Secret
+through `@from_env`, so it never lands in the CR or in
+`preprocessed_configs/users.xml`. Generated Secrets are named
+`<cluster>-tenant-<name>-password`.
+
+**The namespace has to be on the telemetry.** Rotel does not enrich spans with
+Kubernetes metadata, so instrumented workloads must publish it themselves:
+
+```yaml
+env:
+  - name: POD_NAMESPACE
+    valueFrom: {fieldRef: {fieldPath: metadata.namespace}}
+  - name: OTEL_RESOURCE_ATTRIBUTES
+    value: k8s.namespace.name=$(POD_NAMESPACE)
+```
+
+Rows missing the attribute belong to no tenant and are visible only to `default`.
+
+A tenant's `existingSecret` must exist before the upgrade. The password reaches
+ClickHouse as a container environment variable, so a missing Secret leaves the
+ClickHouse pods in `CreateContainerConfigError` rather than just disabling that
+one user.
+
+Grants and filters are generated from the same `tenants.tables` list and cannot
+drift apart, which matters more than it looks: a table a tenant can read but
+that carries no filter returns **every** tenant's rows. That is also why
+`otel_traces_trace_id_ts` is not in the default list — it holds only trace ids
+and timestamps, so there is nothing to filter on.
+
+### Replica placement
+
+The operator derives scheduling rules from two keys rather than taking a raw
+pod spec. The chart defaults to best-effort spreading **across nodes**, so it
+works without zone labels and a cluster with fewer nodes than replicas still
+schedules.
+
+- `topologyZoneKey` — the operator emits a **required** TopologySpreadConstraint
+  (`maxSkew: 1`, `DoNotSchedule`) plus a preferred PodAntiAffinity over this key.
+  Defaults to `kubernetes.io/hostname`.
+- `nodeHostnameKey` — a **required** PodAntiAffinity, at most one pod per node
+  regardless of shard. Excess pods stay `Pending`. The chart leaves this empty:
+  user-supplied `affinity` is *appended* to operator defaults, so a required rule
+  from this key cannot be relaxed afterwards.
+- `spreadPolicy` — chart-level, not an operator field. Renders the constraint
+  that relaxes (or keeps) the operator's default over `topologyZoneKey`:
+  `ScheduleAnyway`, `DoNotSchedule`, or `""` to emit nothing.
+- `topologySpreadConstraints` — the raw operator field, merged into its defaults
+  **by `topologyKey`**. A non-empty list replaces whatever `spreadPolicy` would
+  render. Omit `labelSelector` on an entry that targets `topologyZoneKey`: the
+  operator fills in the pod labels (including the shard id), and a constraint
+  with an empty selector matches nothing.
+
+Spread across AZs instead — one value:
+
+```yaml
+cluster:
+  clickhouse:
+    podTemplate:
+      topologyZoneKey: topology.kubernetes.io/zone
+```
+
+Strict placement (one pod per node, `Pending` when nodes run out):
+
+```yaml
+cluster:
+  clickhouse:
+    podTemplate:
+      nodeHostnameKey: kubernetes.io/hostname
+      spreadPolicy: ""
+```
+
+Switching an existing cluster from strict to best-effort can deadlock: the
+operator updates replicas one at a time and waits for each to become ready,
+while the not-yet-updated replicas still carry the required PodAntiAffinity that
+blocks the new pod. Apply the change before scaling up, or drop the stale rule
+from the remaining StatefulSets to let the rollout finish.
 
 ### Deploying with ArgoCD
 
@@ -243,8 +398,11 @@ helm dependency update
 
 ### Operator-only install
 
+Same namespace as the cluster — `operator.rbac.namespaced` scopes the operator's
+Role to its own namespace. See "Operator RBAC scope" above.
+
 ```bash
-helm upgrade --install ch-operator . -n clickhouse-operator-system --create-namespace \
+helm upgrade --install ch-operator . -n clickhouse --create-namespace \
   --set cluster.enabled=false
 ```
 

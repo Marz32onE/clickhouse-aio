@@ -26,9 +26,13 @@
 operator:
   enabled: true
 
-  ## Watch all namespaces (empty = cluster-wide). Restrict if multi-tenant.
+  ## Namespaces the operator reconciles. Empty means cluster-wide, which
+  ## requires rbac.namespaced=false. With namespaced RBAC this must list
+  ## exactly the release namespace — the operator would otherwise watch
+  ## namespaces its Role does not cover and log permission errors forever.
   controller:
-    watchNamespaces: []
+    watchNamespaces:
+      - clickhouse
     pdbManagement:
       enabled: true
 
@@ -46,7 +50,12 @@ operator:
     # affinity: {}
 
   rbac:
-    namespaced: false
+    ## Role/RoleBinding scoped to the release namespace instead of a
+    ## ClusterRole. The operator then only reaches resources in its own
+    ## namespace, so the ClickHouseCluster must be installed there too — see
+    ## "Operator RBAC scope" in the README. Set false to manage clusters across
+    ## namespaces.
+    namespaced: true
     helpers:
       enabled: false
 
@@ -110,8 +119,16 @@ cluster:
         cpu: "1"
         memory: 2Gi
     podTemplate:
-      topologyZoneKey: topology.kubernetes.io/zone
-      nodeHostnameKey: kubernetes.io/hostname
+      ## Domain replicas are balanced across. Node-level by default; set
+      ## "topology.kubernetes.io/zone" to spread across AZs instead.
+      topologyZoneKey: kubernetes.io/hostname
+      ## ScheduleAnyway (best effort) | DoNotSchedule (strict, excess replicas
+      ## stay Pending) | "" (no constraint emitted)
+      spreadPolicy: ScheduleAnyway
+      ## Empty = best-effort placement. Setting it makes the operator emit a
+      ## *required* PodAntiAffinity (one pod per node, excess pods Pending)
+      ## that spreadPolicy cannot relax.
+      nodeHostnameKey: ""
 
   # ---- ClickHouse servers ---------------------------------------------------
   clickhouse:
@@ -138,8 +155,10 @@ cluster:
         cpu: "4"
         memory: 16Gi
     podTemplate:
-      topologyZoneKey: topology.kubernetes.io/zone
-      nodeHostnameKey: kubernetes.io/hostname
+      ## See cluster.keeper.podTemplate above for what each field does.
+      topologyZoneKey: kubernetes.io/hostname
+      spreadPolicy: ScheduleAnyway
+      nodeHostnameKey: ""
 
     defaultUser:
       ## Prefer: --set cluster.clickhouse.defaultUser.password='...'
@@ -167,6 +186,21 @@ cluster:
       ## Optional app users (do not put plaintext passwords here)
       extraUsersConfig: {}
 
+    ## Read-only users restricted to their own Kubernetes namespaces by a
+    ## ClickHouse row policy. Requires the telemetry to carry the namespace as a
+    ## resource attribute — see charts/cluster/values.yaml for the app-side
+    ## OTEL_RESOURCE_ATTRIBUTES snippet and the full option list.
+    tenants:
+      namespaceAttribute: k8s.namespace.name
+      tables:
+        - otel_traces
+        - otel_logs
+      users: []
+      # users:
+      #   - name: team_a
+      #     namespaces: [team-a]
+      #     existingSecret: ""
+
     ## Note: port 9363 is reserved by the operator for Prometheus metrics —
     ## do not add it here (validation webhook rejects it).
     additionalPorts: []
@@ -183,6 +217,8 @@ cluster:
       ## HA profile (2 replicas): replicate otel tables across the cluster
       engine: ReplicatedMergeTree
       cluster: default
+      ## Retention for the otel tables, as <number><s|m|h|d> ("0s" = forever).
+      ## Applied to existing tables on every upgrade via cluster.rotel.manageTtl.
       ttl: 168h
 
   # ---- TLS (optional; needs cert-manager Issuer) ----------------------------

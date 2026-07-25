@@ -35,9 +35,9 @@ spec:
     imagePullPolicy: {{ .Values.clickhouse.image.pullPolicy }}
     resources:
       {{- toYaml .Values.clickhouse.resources | nindent 6 }}
-    {{- with .Values.clickhouse.containerTemplate.env }}
+    {{- with include "cluster.clickhouseEnv" . }}
     env:
-      {{- toYaml . | nindent 6 }}
+      {{- . | nindent 6 }}
     {{- end }}
     {{- with .Values.clickhouse.containerTemplate.volumeMounts }}
     volumeMounts:
@@ -70,9 +70,9 @@ spec:
     affinity:
       {{- toYaml . | nindent 6 }}
     {{- end }}
-    {{- with .Values.clickhouse.podTemplate.topologySpreadConstraints }}
+    {{- with include "cluster.topologySpreadConstraints" (dict "podTemplate" .Values.clickhouse.podTemplate) }}
     topologySpreadConstraints:
-      {{- toYaml . | nindent 6 }}
+      {{- . | nindent 6 }}
     {{- end }}
     {{- with .Values.clickhouse.podTemplate.volumes }}
     volumes:
@@ -113,8 +113,8 @@ spec:
     extraConfig:
       {{- toYaml . | nindent 6 }}
     {{- end }}
-    {{- with .Values.clickhouse.settings.extraUsersConfig }}
+    {{- with include "cluster.extraUsersConfig" . }}
     extraUsersConfig:
-      {{- toYaml . | nindent 6 }}
+      {{- . | nindent 6 }}
     {{- end }}
 {{- end }}

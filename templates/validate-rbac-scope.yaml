@@ -1,0 +1,17 @@
+{{- /*
+Namespaced operator RBAC only grants access inside the release namespace, so
+the watch list has to match it exactly. An empty list means cluster-wide and a
+foreign namespace is unreachable; either way the operator reconciles nothing
+and only surfaces the problem as repeated permission errors in its log.
+*/ -}}
+{{- if and .Values.operator.enabled .Values.operator.rbac.namespaced }}
+{{- $watch := .Values.operator.controller.watchNamespaces | default list }}
+{{- if not $watch }}
+{{- fail (printf "operator.rbac.namespaced=true needs operator.controller.watchNamespaces set to [%s]: an empty list makes the operator watch every namespace, which its namespaced Role cannot reach" .Release.Namespace) }}
+{{- end }}
+{{- range $ns := $watch }}
+{{- if ne $ns $.Release.Namespace }}
+{{- fail (printf "operator.controller.watchNamespaces contains %q but operator.rbac.namespaced=true only grants access in %q. Install the operator into %q, drop that entry, or set operator.rbac.namespaced=false" $ns $.Release.Namespace $ns) }}
+{{- end }}
+{{- end }}
+{{- end }}

@@ -22,9 +22,11 @@ template-dev: deps
 package: deps lint
 	helm package . --destination dist/
 
-## Two-step install avoids CRD race on first apply
+## Two-step install avoids CRD race on first apply.
+## Both releases share NAMESPACE: operator.rbac.namespaced=true scopes the
+## operator's Role to its own namespace, so the cluster must live there too.
 install-operator:
-	helm upgrade --install $(RELEASE)-operator . -n clickhouse-operator-system --create-namespace \
+	helm upgrade --install $(RELEASE)-operator . -n $(NAMESPACE) --create-namespace \
 		-f $(VALUES) --set cluster.enabled=false
 
 install-cluster:
