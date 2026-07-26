@@ -54,8 +54,6 @@ Sizing (this profile)
 
 Notes
   • Official operator CRDs: ClickHouseCluster / KeeperCluster (clickhouse.com/v1alpha1)
-  • Altinity helm-charts/clickhouse uses a *different* operator (CHI/CHK) and is
-    not mixed into this release — production sizing patterns were used as reference.
   • Set a durable storageClassName before production traffic.
   • Do not change keeper.replicas after the first successful deploy.
 

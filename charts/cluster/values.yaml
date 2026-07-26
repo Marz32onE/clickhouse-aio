@@ -28,9 +28,13 @@ keeper:
   ## Odd number required for quorum. Do not change after first deploy.
   replicas: 3
 
+  ## Registry, repository and tag are separate so a mirror is a one-key override.
+  ## Pinned to a full four-part version, not a rolling 26.x stream: a Keeper
+  ## quorum and the servers talking to it have to move together, deliberately.
   image:
+    registry: docker.io
     repository: clickhouse/clickhouse-keeper
-    tag: "26.3"
+    tag: "26.7.1.1315"
     pullPolicy: IfNotPresent
 
   persistence:
@@ -97,9 +101,11 @@ clickhouse:
   ## in front of them, so >1 shard makes each query see only one shard's rows.
   shards: 1
 
+  ## Keep this on the same version as the Keeper image above.
   image:
+    registry: docker.io
     repository: clickhouse/clickhouse-server
-    tag: "26.3"
+    tag: "26.7.1.1315"
     pullPolicy: IfNotPresent
 
   persistence:
@@ -220,9 +226,11 @@ clickhouse:
     ## granted table without a usable filter returns every tenant's rows.
     ## otel_traces_trace_id_ts is deliberately absent: it holds only trace ids
     ## and timestamps, so it cannot be filtered by namespace.
-    tables:
-      - otel_traces
-      - otel_logs
+    ## Empty derives the list from rotel.telemetry (traces and logs, each with
+    ## its own table prefix) — a signal that is off never gets a grant on a
+    ## table the DDL job did not create. Set an explicit list to override, e.g.
+    ##   tables: [otel_traces, otel_logs]
+    tables: []
     ## Each user gets a Secret named <cluster>-tenant-<name>-password with a
     ## generated password unless existingSecret or password is set.
     users: []
@@ -246,7 +254,7 @@ clickhouse:
     volumeMounts: []
 
 # ---------------------------------------------------------------------------
-# Rotel — lightweight Rust OTLP collector writing traces/logs into ClickHouse
+# Rotel — lightweight Rust OTLP collector writing traces into ClickHouse
 # https://github.com/rotel-dev/rotel
 # Schema-compatible with the OpenTelemetry ClickHouse exporter (otel_traces …).
 # ---------------------------------------------------------------------------
@@ -255,12 +263,16 @@ rotel:
   replicas: 1
 
   image:
+    registry: docker.io
     repository: streamfold/rotel
     tag: "v0.2.2"
     pullPolicy: IfNotPresent
 
-  ## Companion image creating the otel_* table DDL (rotel does not auto-create)
+  ## Companion image creating the otel_* table DDL (rotel does not auto-create).
+  ## Keep on the same version as the agent image above — they ship together and
+  ## the DDL has to match the schema the exporter inserts against.
   ddlImage:
+    registry: docker.io
     repository: streamfold/rotel-clickhouse-ddl
     tag: "v0.2.2"
     pullPolicy: IfNotPresent
@@ -274,17 +286,55 @@ rotel:
   ## created with ttl=0s is skipped — it has none to modify.
   manageTtl: true
 
-  ## Which OTLP signals to accept and store
+  ## Which OTLP signals to accept and store. Each enabled signal gets its tables
+  ## created by the DDL job and an exporter wired in the deployment; disabling
+  ## one also closes its OTLP receiver.
   telemetry:
     traces: true
     logs: true
+    ## App OTLP metrics → ClickHouse. Independent of internalMetrics: with only
+    ## internalMetrics on, the metrics receiver stays open but anything sent to
+    ## it goes to VictoriaMetrics rather than ClickHouse — see below.
     metrics: false
+
+  ## Agent log format for stdout (ROTEL_LOG_FORMAT). text | json
+  ## These are pod logs only; they are never written to ClickHouse.
+  logFormat: json
+
+  ## Rotel's own runtime metrics (--enable-internal-telemetry), shipped OTLP/HTTP
+  ## to VictoriaMetrics. Rotel only starts the internal-metrics pipeline when the
+  ## regular metrics pipeline is active, so enabling this also holds the OTLP
+  ## metrics receiver open. With telemetry.metrics off, app metrics sent to that
+  ## receiver therefore land in VictoriaMetrics; with it on, they go to
+  ## ClickHouse as usual and only Rotel's own metrics go to VictoriaMetrics.
+  internalMetrics:
+    enabled: false
+    ## VictoriaMetrics OTLP *base* URL — Rotel appends /v1/metrics.
+    ## Single-node: http://vmsingle.<ns>.svc:8428/opentelemetry
+    ## Cluster:     http://vminsert.<ns>.svc:8480/insert/0/opentelemetry
+    endpoint: ""
 
   exporter:
     ## Default: http://<cluster>-clickhouse-headless.<ns>.svc.cluster.local:8123
     endpoint: ""
     database: otel
+    ## Default table prefix. Rotel builds table names as <prefix>_<signal>, so
+    ## "otel" gives otel_traces / otel_logs / otel_metrics_*. Only the prefix is
+    ## configurable — the suffixes are fixed by rotel's schema.
     tablePrefix: otel
+    ## Per-signal overrides of the prefix above (empty = inherit). Signals that
+    ## end up sharing a prefix share one exporter and one connection pool;
+    ## differing prefixes get one exporter each. The database is shared.
+    ##   traces: {tablePrefix: app}  ->  otel.app_traces
+    ##   logs:   {tablePrefix: sys}  ->  otel.sys_logs
+    ## Changing a prefix on a live install creates a new empty table; the old one
+    ## keeps its rows and keeps ageing out under its own TTL.
+    traces:
+      tablePrefix: ""
+    logs:
+      tablePrefix: ""
+    metrics:
+      tablePrefix: ""
     user: default
     ## Reuse the ClickHouse default-user secret unless set
     existingSecret: ""
@@ -332,6 +382,28 @@ rotel:
     limits:
       cpu: 500m
       memory: 512Mi
+
+  ## HorizontalPodAutoscaler for the rotel Deployment. Needs metrics-server for
+  ## the cpu/memory targets. When enabled the Deployment stops rendering
+  ## replicas, so helm no longer resets what the HPA chose on every upgrade.
+  ##
+  ## Utilization is a percentage of resources.requests above, so those must be
+  ## set for the target they drive. Scaling out multiplies the number of
+  ## in-flight ClickHouse inserts: with async_insert on, more replicas means more
+  ## smaller batches, so raise exporter batch sizes before raising maxReplicas.
+  autoscaling:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 5
+    ## 0 disables that target. At least one of these (or metrics below) required.
+    targetCPUUtilizationPercentage: 75
+    targetMemoryUtilizationPercentage: 0
+    ## Extra autoscaling/v2 metric entries appended verbatim, e.g. an external
+    ## OTLP-queue-depth metric.
+    metrics: []
+    ## autoscaling/v2 scaling behavior, appended verbatim. Empty uses the
+    ## Kubernetes defaults (scale-down stabilises over 5 minutes).
+    behavior: {}
 
   service:
     type: ClusterIP

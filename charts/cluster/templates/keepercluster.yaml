@@ -26,7 +26,7 @@ spec:
     {{- end }}
   containerTemplate:
     image:
-      repository: {{ .Values.keeper.image.repository | quote }}
+      repository: {{ include "cluster.imageRepository" .Values.keeper.image | quote }}
       tag: {{ .Values.keeper.image.tag | quote }}
     imagePullPolicy: {{ .Values.keeper.image.pullPolicy }}
     resources:

@@ -123,6 +123,126 @@ HTTP endpoint rotel uses to reach ClickHouse (override via rotel.exporter.endpoi
 {{- end }}
 
 {{/*
+Fully-qualified image reference. Registry, repository and tag are kept as three
+explicit values so a mirror or air-gapped registry is a one-key override rather
+than a rewrite of every repository string. An empty registry falls back to
+whatever the node's container runtime resolves the bare repository against.
+Call with an image dict, e.g. (include "cluster.image" .Values.rotel.image).
+*/}}
+{{- define "cluster.image" -}}
+{{- $repository := include "cluster.imageRepository" . -}}
+{{- with .tag -}}
+{{- printf "%s:%s" $repository (. | toString) -}}
+{{- else -}}
+{{- $repository -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Registry-qualified repository, without the tag. The operator CRDs take
+repository and tag as separate fields, so the registry has to be folded into the
+repository for those.
+*/}}
+{{- define "cluster.imageRepository" -}}
+{{- $registry := .registry | default "" | toString | trimSuffix "/" -}}
+{{- if $registry -}}
+{{- printf "%s/%s" $registry .repository -}}
+{{- else -}}
+{{- .repository -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Table prefix for one signal. rotel names its tables <prefix>_<signal>
+(request_mapper.rs get_table_name), so the prefix is the only part of the table
+name that can be customised — the _traces/_logs/_metrics_* suffixes are fixed.
+rotel.exporter.<signal>.tablePrefix overrides rotel.exporter.tablePrefix.
+Call with (dict "root" $ "signal" "traces").
+*/}}
+{{- define "cluster.rotelTablePrefix" -}}
+{{- $e := .root.Values.rotel.exporter -}}
+{{- $base := $e.tablePrefix | default "otel" -}}
+{{- $p := dig .signal "tablePrefix" "" $e | toString | default $base -}}
+{{- if not (regexMatch "^[A-Za-z_][A-Za-z0-9_]*$" $p) -}}
+{{- fail (printf "rotel.exporter.%s.tablePrefix %q: must be a ClickHouse identifier matching ^[A-Za-z_][A-Za-z0-9_]*$" .signal $p) -}}
+{{- end -}}
+{{- $p -}}
+{{- end }}
+
+{{/*
+ClickHouse exporter groups for rotel's multi-exporter layout: one entry per
+distinct table prefix, listing the enabled signals routed to it. Signals that
+share a prefix share one exporter, and therefore one connection pool.
+
+Both the deployment and the DDL job read this, so the exporter rotel writes
+through and the tables the DDL job creates can never drift apart.
+
+Returns YAML: [{name: ch_otel, prefix: otel, signals: [traces, logs]}]
+*/}}
+{{- define "cluster.rotelExporterGroups" -}}
+{{- $telemetry := .Values.rotel.telemetry -}}
+{{- $order := list -}}
+{{- $groups := dict -}}
+{{- range $signal := list "traces" "logs" "metrics" -}}
+  {{- if index $telemetry $signal -}}
+    {{- $prefix := include "cluster.rotelTablePrefix" (dict "root" $ "signal" $signal) -}}
+    {{- if not (hasKey $groups $prefix) -}}
+      {{- $order = append $order $prefix -}}
+      {{- $_ := set $groups $prefix list -}}
+    {{- end -}}
+    {{- $_ := set $groups $prefix (append (index $groups $prefix) $signal) -}}
+  {{- end -}}
+{{- end -}}
+{{- $out := list -}}
+{{- range $prefix := $order -}}
+{{- $out = append $out (dict "name" (printf "ch_%s" $prefix) "prefix" $prefix "signals" (index $groups $prefix)) -}}
+{{- end -}}
+{{- toYaml $out -}}
+{{- end }}
+
+{{/*
+Env block for one ClickHouse exporter. rotel reads a named exporter's settings
+from ROTEL_EXPORTER_<NAME>_<FIELD> (init/config.rs args_from_env_prefix).
+Call with (dict "root" $ "name" "ch_otel" "prefix" "otel").
+*/}}
+{{- define "cluster.rotelClickhouseExporterEnv" -}}
+{{- $root := .root -}}
+{{- $var := printf "ROTEL_EXPORTER_%s" (upper .name) -}}
+{{- $async := $root.Values.rotel.exporter.asyncInsert | toString | lower -}}
+{{- if not (has $async (list "true" "false" "1" "0")) -}}
+{{- fail (printf "rotel.exporter.asyncInsert %q: must be true or false" $root.Values.rotel.exporter.asyncInsert) -}}
+{{- end -}}
+{{- /* The capitalisation is load-bearing. rotel types this field as String and
+     reads a named exporter's config through figment, which coerces "true",
+     "false", "1" and "0" to bool/number and then fails deserialisation with
+     `invalid type: found bool true, expected a string`. "True"/"False" parse as
+     neither, so they survive as strings, and rotel lowercases before matching
+     (init/parse.rs parse_bool_value). */ -}}
+{{- $asyncInsert := ternary "True" "False" (has $async (list "true" "1")) -}}
+- name: {{ $var }}_ENDPOINT
+  value: {{ include "cluster.rotelClickhouseEndpoint" $root | quote }}
+- name: {{ $var }}_DATABASE
+  value: {{ $root.Values.rotel.exporter.database | quote }}
+- name: {{ $var }}_TABLE_PREFIX
+  value: {{ .prefix | quote }}
+- name: {{ $var }}_USER
+  value: {{ $root.Values.rotel.exporter.user | quote }}
+- name: {{ $var }}_PASSWORD
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "cluster.rotelPasswordSecretName" $root | quote }}
+      key: {{ include "cluster.rotelPasswordSecretKey" $root | quote }}
+- name: {{ $var }}_COMPRESSION
+  value: {{ $root.Values.rotel.exporter.compression | quote }}
+- name: {{ $var }}_ASYNC_INSERT
+  value: {{ $asyncInsert | quote }}
+{{- if $root.Values.rotel.exporter.enableJson }}
+- name: {{ $var }}_ENABLE_JSON
+  value: "true"
+{{- end }}
+{{- end }}
+
+{{/*
 Secret holding the password rotel authenticates with (defaults to the
 ClickHouse default-user secret)
 */}}
@@ -271,6 +391,13 @@ grammar has no quote characters to escape.
 
 {{/*
 Fully-qualified tables tenants may read, e.g. "otel.otel_traces".
+
+An empty clickhouse.tenants.tables derives the list from the signals rotel is
+actually storing, using each signal's table prefix. Granting a table the DDL job
+never created leaves the tenant with a grant and a row policy pointing at
+nothing, and a renamed prefix would leave them pointing at the old name.
+Metrics are deliberately excluded: their retention story is rollups, not raw
+row-level reads.
 */}}
 {{- define "cluster.tenantTables" -}}
 {{- $tenants := .Values.clickhouse.tenants | default dict -}}
@@ -279,8 +406,17 @@ Fully-qualified tables tenants may read, e.g. "otel.otel_traces".
 {{- fail "clickhouse.tenants.database is empty and rotel.exporter.database is unset — tenants need a database to grant on" -}}
 {{- end -}}
 {{- $out := list -}}
-{{- range $t := ($tenants.tables | default list) -}}
+{{- if $tenants.tables -}}
+{{- range $t := $tenants.tables -}}
 {{- $out = append $out (printf "%s.%s" $db $t) -}}
+{{- end -}}
+{{- else -}}
+{{- range $signal := list "traces" "logs" -}}
+{{- if index $.Values.rotel.telemetry $signal -}}
+{{- $prefix := include "cluster.rotelTablePrefix" (dict "root" $ "signal" $signal) -}}
+{{- $out = append $out (printf "%s.%s_%s" $db $prefix $signal) -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}
 {{- toYaml $out -}}
 {{- end }}
@@ -304,7 +440,7 @@ honours the first, silently dropping every grant after it.
 {{- if $tenantList -}}
   {{- $tables := include "cluster.tenantTables" . | fromYamlArray -}}
   {{- if not $tables -}}
-  {{- fail "clickhouse.tenants.tables is empty — tenants would have no readable tables" -}}
+  {{- fail "no tenant-readable tables: clickhouse.tenants.tables is empty and rotel.telemetry has neither traces nor logs enabled" -}}
   {{- end -}}
   {{- $attr := (.Values.clickhouse.tenants.namespaceAttribute | default "k8s.namespace.name") -}}
   {{- if not (regexMatch "^[A-Za-z0-9_.-]+$" $attr) -}}

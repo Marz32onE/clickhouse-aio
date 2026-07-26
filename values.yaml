@@ -42,6 +42,15 @@ operator:
     pdbManagement:
       enabled: true
 
+  ## Pinned explicitly rather than falling through to the subchart's
+  ## appVersion default, so the operator version is visible here and an upgrade
+  ## of the vendored chart cannot move it on its own.
+  image:
+    registry: ""
+    repository: ghcr.io/clickhouse/clickhouse-operator
+    tag: "v0.0.7"
+    pullPolicy: IfNotPresent
+
   manager:
     enabled: true
     replicas: 1
@@ -108,8 +117,9 @@ cluster:
     enabled: true
     replicas: 3
     image:
+      registry: docker.io
       repository: clickhouse/clickhouse-keeper
-      tag: "26.3"
+      tag: "26.7.1.1315"
       pullPolicy: IfNotPresent
     persistence:
       ## Set to your CSI class (e.g. gp3, premium-rwo, local-path for lab)
@@ -146,8 +156,9 @@ cluster:
     ## query return only the shard it landed on. See the header note.
     shards: 1
     image:
+      registry: docker.io
       repository: clickhouse/clickhouse-server
-      tag: "26.3"
+      tag: "26.7.1.1315"
       pullPolicy: IfNotPresent
     persistence:
       storageClassName: ""
@@ -200,9 +211,10 @@ cluster:
     ## OTEL_RESOURCE_ATTRIBUTES snippet and the full option list.
     tenants:
       namespaceAttribute: k8s.namespace.name
-      tables:
-        - otel_traces
-        - otel_logs
+      ## Empty derives the readable tables from cluster.rotel.telemetry and each
+      ## signal's table prefix, so a disabled signal never gets a grant on a
+      ## table that was never created. Override with an explicit list if needed.
+      tables: []
       users: []
       # users:
       #   - name: team_a
@@ -217,10 +229,36 @@ cluster:
   rotel:
     enabled: true
     replicas: 1
+    image:
+      registry: docker.io
+      repository: streamfold/rotel
+      tag: "v0.2.2"
+      pullPolicy: IfNotPresent
+    ## Creates the otel_* tables. Keep on the same version as the agent above.
+    ddlImage:
+      registry: docker.io
+      repository: streamfold/rotel-clickhouse-ddl
+      tag: "v0.2.2"
+      pullPolicy: IfNotPresent
     telemetry:
       traces: true
       logs: true
       metrics: false
+    ## Agent stdout format (pod logs only, never written to ClickHouse)
+    logFormat: json
+    ## Opt-in: Rotel's own runtime metrics → VictoriaMetrics (OTLP/HTTP).
+    ## Set endpoint to your VM OTLP base URL (Rotel appends /v1/metrics).
+    ## Also holds the OTLP metrics receiver open — see charts/cluster/values.yaml.
+    internalMetrics:
+      enabled: false
+      # endpoint: http://vmsingle.monitoring.svc:8428/opentelemetry
+      endpoint: ""
+    ## Scale the collector on CPU. Needs metrics-server.
+    autoscaling:
+      enabled: false
+      minReplicas: 1
+      maxReplicas: 5
+      targetCPUUtilizationPercentage: 75
     exporter:
       ## HA profile (2 replicas): replicate otel tables across the cluster
       engine: ReplicatedMergeTree
@@ -234,6 +272,12 @@ cluster:
       ## Retention for the otel tables, as <number><s|m|h|d> ("0s" = forever).
       ## Applied to existing tables on every upgrade via cluster.rotel.manageTtl.
       ttl: 168h
+      ## Tables are named <prefix>_traces / <prefix>_logs. Override the prefix
+      ## per signal to split them apart; empty inherits exporter.tablePrefix.
+      # traces:
+      #   tablePrefix: app
+      # logs:
+      #   tablePrefix: sys
 
   # ---- TLS (optional; needs cert-manager Issuer) ----------------------------
   ## Mutual TLS for ClickHouse <-> Keeper and client connections. Needs

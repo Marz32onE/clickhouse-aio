@@ -30,7 +30,7 @@ spec:
         storage: {{ .Values.clickhouse.persistence.size | quote }}
   containerTemplate:
     image:
-      repository: {{ .Values.clickhouse.image.repository | quote }}
+      repository: {{ include "cluster.imageRepository" .Values.clickhouse.image | quote }}
       tag: {{ .Values.clickhouse.image.tag | quote }}
     imagePullPolicy: {{ .Values.clickhouse.image.pullPolicy }}
     resources:

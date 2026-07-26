@@ -4,18 +4,10 @@ Production-oriented **all-in-one Helm chart** for ClickHouse on Kubernetes.
 
 | Subchart | Source | Role |
 |----------|--------|------|
-| **operator** | Official [`clickhouse-operator-helm`](https://clickhouse.com/blog/clickhouse-kubernetes-operator) (`oci://ghcr.io/clickhouse/clickhouse-operator-helm`) | Installs the ClickHouse Inc operator + CRDs |
-| **cluster** | Local (`charts/cluster`) | Deploys `KeeperCluster` + `ClickHouseCluster` CRs, plus the [Rotel](https://github.com/rotel-dev/rotel) OTLP collector |
+| **operator** | Official [`clickhouse-operator-helm`](https://clickhouse.com/docs/clickhouse-operator/overview), vendored at `charts/clickhouse-operator-helm/` | ClickHouse Inc operator + CRDs (`ClickHouseCluster` / `KeeperCluster`, `clickhouse.com/v1alpha1`) |
+| **cluster** | Local (`charts/cluster`) | The CRs themselves, plus the [Rotel](https://github.com/rotel-dev/rotel) OTLP collector and its schema/TTL Jobs |
 
 Default profile targets a **small-business production** footprint: HA without over-sharding.
-
-## Why not the Altinity clickhouse chart as the second subchart?
-
-The [Altinity clickhouse chart](https://github.com/Altinity/helm-charts/tree/main/charts/clickhouse) manages clusters via the **Altinity Operator** (`ClickHouseInstallation` / `ClickHouseKeeperInstallation` CRDs).
-
-The [official ClickHouse Operator](https://clickhouse.com/blog/clickhouse-kubernetes-operator) uses different CRDs (`ClickHouseCluster` / `KeeperCluster` under `clickhouse.com/v1alpha1`).
-
-They **cannot be mixed**. This chart follows the official operator and reuses **production sizing patterns** (replicas, keeper, storage, resources) commonly used with the Altinity chart.
 
 ## Architecture
 
@@ -30,8 +22,11 @@ They **cannot be mixed**. This chart follows the official operator and reuses **
  ┌─────────────────────┐                     ┌──────────────────────────┐
  │ operator (official) │                     │ cluster (local subchart) │
  │ CRDs + controller   │  reconciles ──────► │ KeeperCluster (3)        │
- │ webhooks + metrics  │                     │ ClickHouseCluster (1×2)  │
+ │ webhooks + metrics  │                     │ ClickHouseCluster (1×3)  │
  └─────────────────────┘                     └──────────────────────────┘
+                                             │ rotel Deployment + Svc   │
+                                             │ DDL Job / TTL Job        │
+                                             └──────────────────────────┘
 ```
 
 **Default topology**
@@ -39,10 +34,20 @@ They **cannot be mixed**. This chart follows the official operator and reuses **
 | Component | Count | CPU (req–lim) | Memory (req–lim) | Disk / pod |
 |-----------|-------|---------------|------------------|------------|
 | ClickHouse Keeper | 3 | 500m–1 | 1–2 Gi | 20 Gi |
-| ClickHouse server | 2 (1 shard) | 2–4 | 8–16 Gi | 200 Gi |
+| ClickHouse server | 3 (1 shard) | 2–4 | 8–16 Gi | 200 Gi |
+| Rotel collector | 1 | 50m–500m | 128–512 Mi | — |
 | Operator manager | 1 | 50m–500m | 128–256 Mi | — |
 
-Total rough floor: **~4.5 CPU / ~18 Gi RAM / ~440 Gi storage** (plus headroom for merges/queries).
+Total rough floor: **~7.6 CPU / ~27 Gi RAM / ~660 Gi storage** (plus headroom for merges/queries).
+
+**Images** are pinned explicitly in `values.yaml` as `registry` / `repository` / `tag`,
+so a mirror is a one-key override and no tag floats:
+
+| Image | Default |
+|-------|---------|
+| ClickHouse server / Keeper | `docker.io/clickhouse/clickhouse-{server,keeper}:26.7.1.1315` |
+| Operator | `ghcr.io/clickhouse/clickhouse-operator:v0.0.7` |
+| Rotel + DDL tool | `docker.io/streamfold/rotel{,-clickhouse-ddl}:v0.2.2` |
 
 ## Prerequisites
 
@@ -146,6 +151,13 @@ kubectl exec -it -n clickhouse <clickhouse-pod> -- clickhouse-client
 | `cluster.clickhouse.resources` | 2–4 CPU / 8–16Gi | Tune to node size |
 | `cluster.tls.enabled` | `false` | Needs cert-manager + an Issuer |
 | `cluster.rotel.enabled` | `true` | OTLP collector (traces/logs → ClickHouse) |
+| `cluster.rotel.telemetry.{traces,logs,metrics}` | `true/true/false` | Off also closes that OTLP receiver |
+| `cluster.rotel.exporter.tablePrefix` | `otel` | Tables are `<prefix>_traces` / `<prefix>_logs` |
+| `cluster.rotel.exporter.{traces,logs}.tablePrefix` | `""` | Per-signal override; empty inherits the above |
+| `cluster.rotel.autoscaling.enabled` | `false` | HPA on the collector; needs metrics-server |
+| `cluster.rotel.logFormat` | `json` | Agent stdout: `text` or `json` |
+| `cluster.rotel.internalMetrics.enabled` | `false` | Rotel runtime metrics → VictoriaMetrics |
+| `cluster.rotel.internalMetrics.endpoint` | `""` | VM OTLP base URL (Rotel appends `/v1/metrics`) |
 | `cluster.rotel.exporter.engine` | `ReplicatedMergeTree` | `MergeTree` for single replica |
 | `cluster.rotel.exporter.databaseEngine` | `Replicated` | Keeps a new replica's table UUIDs aligned |
 | `cluster.rotel.exporter.ttl` | `168h` | Retention; `<n><s\|m\|h\|d>`, `0s` = forever |
@@ -153,6 +165,7 @@ kubectl exec -it -n clickhouse <clickhouse-pod> -- clickhouse-client
 | `operator.rbac.namespaced` | `true` | Role instead of ClusterRole |
 | `operator.controller.watchNamespaces` | `[clickhouse]` | Must equal the release namespace |
 | `cluster.clickhouse.tenants.users` | `[]` | Per-namespace read-only users |
+| `cluster.clickhouse.tenants.tables` | `[]` | Empty derives it from the enabled signals |
 | `cluster.*.podTemplate.topologyZoneKey` | `kubernetes.io/hostname` | Domain replicas spread across |
 | `cluster.*.podTemplate.spreadPolicy` | `ScheduleAnyway` | Or `DoNotSchedule` / `""` |
 | `cluster.*.podTemplate.nodeHostnameKey` | `""` | Non-empty = strict one pod per node |
@@ -240,8 +253,8 @@ door). It then reads the result back from every replica through
 restarting during the upgrade is picked up by the Job's retry rather than
 silently left on the old retention.
 
-All three otel tables carry `ttl_only_drop_parts = 1`: whole parts are dropped
-once every row in them has expired, instead of rewriting parts to delete rows.
+The otel tables carry `ttl_only_drop_parts = 1`: whole parts are dropped once
+every row in them has expired, instead of rewriting parts to delete rows.
 Retention is therefore granular to the partition, which is one day.
 
 To retain traces and logs for different periods, turn `manageTtl` off and run
@@ -310,11 +323,16 @@ ClickHouse as a container environment variable, so a missing Secret leaves the
 ClickHouse pods in `CreateContainerConfigError` rather than just disabling that
 one user.
 
-Grants and filters are generated from the same `tenants.tables` list and cannot
-drift apart, which matters more than it looks: a table a tenant can read but
-that carries no filter returns **every** tenant's rows. That is also why
-`otel_traces_trace_id_ts` is not in the default list — it holds only trace ids
-and timestamps, so there is nothing to filter on.
+Grants and filters are generated from the same list and cannot drift apart,
+which matters more than it looks: a table a tenant can read but that carries no
+filter returns **every** tenant's rows.
+
+`tenants.tables` is empty by default, which derives the list from the signals
+Rotel is actually storing, using each signal's table prefix — so a disabled
+signal or a renamed prefix never leaves a grant pointing at a table that does
+not exist. Set an explicit list to override. `otel_traces_trace_id_ts` is never
+included: it holds only trace ids and timestamps, so there is nothing to filter
+on.
 
 ### Replica placement
 
@@ -452,11 +470,17 @@ Still required in the air-gapped environment: the **container images**
 (mirror to your private registry and override the repositories):
 
 ```
-clickhouse/clickhouse-server:26.3      clickhouse/clickhouse-keeper:26.3
-ghcr.io/clickhouse/clickhouse-operator:<operator tag>
-streamfold/rotel:v0.2.2                streamfold/rotel-clickhouse-ddl:v0.2.2
+docker.io/clickhouse/clickhouse-server:26.7.1.1315
+docker.io/clickhouse/clickhouse-keeper:26.7.1.1315
+ghcr.io/clickhouse/clickhouse-operator:v0.0.7
+docker.io/streamfold/rotel:v0.2.2
+docker.io/streamfold/rotel-clickhouse-ddl:v0.2.2
 quay.io/jetstack/cert-manager-*:v1.21.0
 ```
+
+Every one of those is a `registry` / `repository` / `tag` triple in
+`values.yaml`, so pointing at a mirror is `--set ...image.registry=my.registry`
+rather than a rewrite of each repository string.
 
 To refresh the vendored operator chart when a new release ships:
 
@@ -488,11 +512,11 @@ helm upgrade --install ch-cluster . -n clickhouse --create-namespace \
 ## OTLP ingestion (Rotel) + ClickStack UI
 
 The chart deploys [Rotel](https://github.com/rotel-dev/rotel), a lightweight Rust
-OTLP collector, writing traces/logs into ClickHouse with the standard
+OTLP collector, writing traces and logs into ClickHouse with the standard
 OpenTelemetry ClickHouse-exporter schema (`otel.otel_traces`, `otel.otel_logs`).
 A post-install Job creates the schema via `rotel-clickhouse-ddl`
-(`ReplicatedMergeTree` + `ON CLUSTER default` by default — matches the operator's
-cluster/macros config).
+(`ReplicatedMergeTree` + `ON CLUSTER default` by default — matches the
+operator's cluster/macros config).
 
 Point your apps / SDKs at:
 
@@ -500,6 +524,67 @@ Point your apps / SDKs at:
 OTLP/gRPC  <cluster-name>-rotel.<namespace>.svc:4317
 OTLP/HTTP  <cluster-name>-rotel.<namespace>.svc:4318
 ```
+
+`cluster.rotel.telemetry.{traces,logs,metrics}` selects the signals. A signal
+turned off gets no tables from the DDL Job, no exporter in the deployment, and
+its OTLP receiver closed — the three are generated from one list and cannot
+drift apart. Agent stdout (`logFormat`) is pod logs only and is never written
+to ClickHouse.
+
+### Table names
+
+Rotel builds table names as `<prefix>_<signal>`; only the prefix is
+configurable. `exporter.tablePrefix` sets the default, and each signal can
+override it:
+
+```yaml
+cluster:
+  rotel:
+    exporter:
+      tablePrefix: otel
+      traces: {tablePrefix: app}   # otel.app_traces
+      logs:   {tablePrefix: sys}   # otel.sys_logs
+```
+
+Signals sharing a prefix share one exporter and one connection pool; differing
+prefixes get one exporter each. The database is shared. Changing a prefix on a
+live install creates a new empty table — the old one keeps its rows and ages
+out under its own TTL.
+
+### Autoscaling the collector
+
+```bash
+helm upgrade ch-aio . -n clickhouse \
+  --set cluster.rotel.autoscaling.enabled=true \
+  --set cluster.rotel.autoscaling.maxReplicas=6
+```
+
+Renders an `autoscaling/v2` HPA on CPU (75% of `resources.requests.cpu` by
+default) and stops rendering `replicas` on the Deployment, so a helm upgrade no
+longer resets what the HPA chose. Needs metrics-server. Scaling out multiplies
+in-flight ClickHouse inserts: with `async_insert` on, more replicas means more
+smaller batches, so raise batch sizes before raising `maxReplicas`.
+
+### Rotel's own runtime metrics
+
+```bash
+helm upgrade ch-aio . -n clickhouse \
+  --set cluster.rotel.internalMetrics.enabled=true \
+  --set cluster.rotel.internalMetrics.endpoint=http://vmsingle.monitoring.svc:8428/opentelemetry
+```
+
+Adds an OTLP/HTTP exporter to VictoriaMetrics alongside the ClickHouse ones and
+routes Rotel's internal metrics to it (the base URL gets `/v1/metrics`
+appended). ClickHouse keeps whatever signals `telemetry` enables.
+
+Rotel only starts its internal-metrics pipeline when the regular metrics
+pipeline is active, so enabling this also holds the OTLP metrics receiver open.
+The consequence depends on `telemetry.metrics`:
+
+| `telemetry.metrics` | App metrics sent to Rotel | Rotel's own metrics |
+|---------------------|---------------------------|---------------------|
+| `false` (default) | VictoriaMetrics | VictoriaMetrics |
+| `true` | ClickHouse `<prefix>_metrics_*` | VictoriaMetrics |
 
 Notes:
 - Port `9363` is reserved by the operator for Prometheus metrics — the
@@ -573,4 +658,4 @@ kubectl delete pvc -n clickhouse -l app.kubernetes.io/instance=ch-aio
 - [Introducing the Official ClickHouse Kubernetes Operator](https://clickhouse.com/blog/clickhouse-kubernetes-operator)
 - [Operator docs](https://clickhouse.com/docs/clickhouse-operator/overview)
 - [Configuration guide](https://clickhouse.com/docs/clickhouse-operator/guides/configuration)
-- [Altinity clickhouse chart (reference sizing)](https://github.com/Altinity/helm-charts/tree/main/charts/clickhouse)
+- [Rotel](https://github.com/streamfold/rotel) — collector and ClickHouse exporter

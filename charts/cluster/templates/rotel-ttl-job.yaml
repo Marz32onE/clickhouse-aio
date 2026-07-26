@@ -2,6 +2,8 @@
 {{- $chHost := include "cluster.clickhouseHost" . }}
 {{- $seconds := include "cluster.rotelTtlSeconds" . }}
 {{- $replicated := include "cluster.rotelDatabaseReplicated" . }}
+{{- $prefixes := list }}
+{{- range $g := (include "cluster.rotelExporterGroups" . | fromYamlArray) }}{{- $prefixes = append $prefixes $g.prefix }}{{- end }}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -28,7 +30,7 @@ spec:
       restartPolicy: OnFailure
       containers:
         - name: apply-ttl
-          image: "{{ .Values.clickhouse.image.repository }}:{{ .Values.clickhouse.image.tag }}"
+          image: {{ include "cluster.image" .Values.clickhouse.image | quote }}
           imagePullPolicy: {{ .Values.clickhouse.image.pullPolicy }}
           env:
             - name: CH_PASSWORD
@@ -41,7 +43,10 @@ spec:
             - -ec
             - |
               DB={{ .Values.rotel.exporter.database | quote }}
-              PREFIX={{ .Values.rotel.exporter.tablePrefix | quote }}
+              # Every prefix rotel writes under, so a per-signal tablePrefix is
+              # covered too. Prefixes can nest (otel, otel_app), which makes the
+              # same table match twice — sorted -u below drops the duplicate.
+              PREFIXES={{ join " " $prefixes | quote }}
               SECONDS_TTL={{ $seconds | quote }}
               {{- if $replicated }}
               # The Replicated database engine puts the ALTER in its own DDL log
@@ -69,11 +74,12 @@ spec:
 
               # Only MergeTree-family tables carry a TTL. Views and the
               # materialized view have none to modify.
-              TABLES=$(ch "SELECT name FROM system.tables
-                           WHERE database = '$DB'
-                             AND name LIKE '${PREFIX}\_%'
-                             AND engine LIKE '%MergeTree'
-                           ORDER BY name")
+              TABLES=$(for PREFIX in $PREFIXES; do
+                         ch "SELECT name FROM system.tables
+                             WHERE database = '$DB'
+                               AND name LIKE '${PREFIX}\_%'
+                               AND engine LIKE '%MergeTree'"
+                       done | sort -u)
 
               for T in $TABLES; do
                 # Reuse whatever expression the table already measures TTL from,
