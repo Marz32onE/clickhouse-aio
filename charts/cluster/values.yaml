@@ -1,11 +1,21 @@
 ## Default values for the cluster subchart.
 ## Parent chart (clickhouse-aio) overrides these for production small-business sizing.
 
+## Replaces the chart name inside the generated fullname, and is also the value
+## of app.kubernetes.io/name. That label is part of the selector labels, and a
+## Deployment's spec.selector cannot be changed after creation — so this is an
+## install-time decision. Changing it on a live release makes the upgrade fail
+## until the rotel Deployment is deleted by hand.
 nameOverride: ""
+
+## Replaces the generated fullname outright. This is the base name of the
+## KeeperCluster and ClickHouseCluster CRs (both take the same one, which is
+## what lines the operator's headless service names up), the rotel
+## Deployment/Service/Jobs, the generated password Secret and the pre-created
+## per-replica PVCs. Safe to set on an install; changing it later renames every
+## one of those, which the operator sees as a new cluster.
 fullnameOverride: ""
-## Override shared base name for KeeperCluster + ClickHouseCluster CRs
-## (official examples use the same name for both kinds).
-clusterName: ""
+
 commonLabels: {}
 
 ## ArgoCD integration: annotate cluster resources with a sync-wave so the
@@ -23,7 +33,9 @@ argocd:
 # ---------------------------------------------------------------------------
 keeper:
   enabled: true
-  ## Override KeeperCluster metadata.name (default: shared clusterName)
+  ## Override KeeperCluster metadata.name. Renames only this CR — set
+  ## clickhouse.name too if the pair should keep matching names.
+  ## Default: the chart fullname.
   name: ""
   ## Odd number required for quorum. Do not change after first deploy.
   replicas: 3
@@ -54,33 +66,69 @@ keeper:
       memory: 2Gi
 
   podTemplate:
-    ## Domain replicas are balanced across. Node-level by default so it works on
-    ## clusters without zone labels; set "topology.kubernetes.io/zone" for AZ
-    ## spreading.
-    topologyZoneKey: kubernetes.io/hostname
-    ## How hard that spreading is enforced over topologyZoneKey:
-    ##   ScheduleAnyway  — best effort; replicas share a domain when there are
-    ##                     fewer domains than replicas
-    ##   DoNotSchedule   — strict; excess replicas stay Pending
-    ##   ""              — emit no spread constraint (operator default applies,
-    ##                     which is equivalent to DoNotSchedule)
-    spreadPolicy: ScheduleAnyway
-    ## Empty on purpose: a non-empty value makes the operator emit a *required*
-    ## PodAntiAffinity (one pod per node, excess pods stay Pending) that cannot
-    ## be relaxed later, because user `affinity` is appended to operator
-    ## defaults rather than replacing them. Set it only to enforce exclusive
-    ## node occupancy.
-    nodeHostnameKey: ""
+    ## Placement keys, both at the values the operator's API reference
+    ## recommends. They drive two different operator-generated rules:
+    ##
+    ##   topologyZoneKey  — the domain pods holding the same data are balanced
+    ##                      across. Emits a *required* TopologySpreadConstraint
+    ##                      (maxSkew 1, DoNotSchedule) plus a *preferred*
+    ##                      PodAntiAffinity over this key.
+    ##   nodeHostnameKey  — exclusive node occupancy. Emits a *required*
+    ##                      PodAntiAffinity across every pod of the cluster: at
+    ##                      most one per node, regardless of shard.
+    ##
+    ## Fewer zones than replicas is fine — maxSkew 1 lets several replicas share
+    ## a domain, still evenly balanced. What does strand pods is a node with no
+    ## zone label at all (DoNotSchedule skips it), and nodeHostnameKey on a
+    ## cluster with fewer nodes than replicas. Clear the keys for a single-node
+    ## install — see "Dev / local cluster" in the README.
+    topologyZoneKey: topology.kubernetes.io/zone
+    nodeHostnameKey: kubernetes.io/hostname
     labels: {}
+    # labels:
+    #   tier: storage
     annotations: {}
+    # annotations:
+    #   karpenter.sh/do-not-disrupt: "true"     # keep the autoscaler off a quorum member
+    #   prometheus.io/scrape: "false"
+    ## Pin the pods to a node pool. Keeper is latency-sensitive and small, so
+    ## it usually wants the same nodes as ClickHouse rather than a spot pool.
     nodeSelector: {}
+    # nodeSelector:
+    #   node-role.kubernetes.io/database: "true"
+    ## Needed when those nodes are tainted — a nodeSelector alone does not let a
+    ## pod onto a tainted node.
     tolerations: []
+    # tolerations:
+    #   - key: dedicated
+    #     operator: Equal
+    #     value: clickhouse
+    #     effect: NoSchedule
+    ## Appended to the operator's own rules rather than replacing them, so a
+    ## required rule added here cannot be relaxed by a later upgrade.
     affinity: {}
-    ## Escape hatch: a non-empty list replaces whatever spreadPolicy would
-    ## generate. Entries merge into the operator defaults by topologyKey, so use
-    ## topologyZoneKey's value to adjust the generated constraint and any other
-    ## key to add one. Omit labelSelector on the former — the operator fills in
-    ## the pod labels; a constraint with an empty selector matches nothing.
+    # affinity:
+    #   nodeAffinity:
+    #     requiredDuringSchedulingIgnoredDuringExecution:
+    #       nodeSelectorTerms:
+    #         - matchExpressions:
+    #             - key: topology.kubernetes.io/zone
+    #               operator: In
+    #               values: [ap-northeast-1a, ap-northeast-1c]
+    ## The operator's own field, passed through verbatim. Entries merge into the
+    ## operator defaults by topologyKey, so repeating topologyZoneKey's value
+    ## replaces the required DoNotSchedule constraint it generates, and any other
+    ## key adds one alongside. Omit labelSelector when targeting topologyZoneKey:
+    ## the operator fills in the pod labels, including the shard id, and a
+    ## constraint with an empty selector matches nothing.
+    ##
+    ## Relaxing the operator's spread is a deliberate step away from the HA
+    ## posture its docs recommend, so it is spelled out in full rather than
+    ## hidden behind a chart-invented shorthand:
+    # topologySpreadConstraints:
+    #   - maxSkew: 1
+    #     topologyKey: topology.kubernetes.io/zone
+    #     whenUnsatisfiable: ScheduleAnyway
     topologySpreadConstraints: []
 
   settings: {}
@@ -93,7 +141,10 @@ keeper:
 # ---------------------------------------------------------------------------
 clickhouse:
   enabled: true
-  ## Override ClickHouseCluster metadata.name (default: shared clusterName)
+  ## Override ClickHouseCluster metadata.name. Renames only this CR — the
+  ## KeeperCluster keeps its own name (keeper.name), so setting one and not the
+  ## other splits the pair. It also moves the per-replica PVC names below, and
+  ## the rotel exporter endpoint follows it. Default: the chart fullname.
   name: ""
   ## Replicas per shard (HA). Every replica holds the full dataset.
   replicas: 3
@@ -116,6 +167,48 @@ clickhouse:
     size: 200Gi
     annotations: {}
 
+    ## Give individual replicas their own StorageClass (or size).
+    ##
+    ## The CRD carries a single dataVolumeClaimSpec for the whole cluster, so
+    ## the operator cannot vary it per replica. It does create one StatefulSet
+    ## per replica with a deterministic claim name, though, and a StatefulSet
+    ## adopts a claim that already carries that name without checking its
+    ## StorageClass. Listing a replica here pre-creates that claim; anything not
+    ## listed keeps using the settings above.
+    ##
+    ## Claim name: <volumeName>-<clickhouseName>-clickhouse-<shard>-<replica>-0
+    ##
+    ## The cluster name has to stay short: past a 63-character StatefulSet name
+    ## the operator shortens the middle and splices in a hash, and the predicted
+    ## claim would belong to nothing. The chart refuses to render then — keep
+    ## the name at 48 characters or fewer for single-digit shard/replica.
+    ##
+    ## Only meaningful when the replicas are deliberately asymmetric — a cold
+    ## replica kept for backups, say. ClickHouse replication assumes comparable
+    ## hardware, and rotel writes through the headless Service, so a slower
+    ## replica both lags on merges and still serves its share of queries.
+    ##
+    ## The claims are kept on uninstall (helm.sh/resource-policy: keep), and
+    ## size changes here do not reach a claim that already exists — expand it
+    ## with `kubectl patch pvc` instead.
+    perReplica: []
+    # perReplica:
+    #   - replica: 0
+    #     storageClassName: fast-nvme
+    #   - replica: 1
+    #     storageClassName: standard-ssd
+    #     size: 500Gi
+    #     ## shard defaults to 0; set it on a multi-shard cluster
+    #     # shard: 0
+    #     # accessModes: [ReadWriteOnce]
+    #     # labels: {}
+    #     # annotations: {}
+
+    ## Name of the volume claim template the operator generates. Only change it
+    ## if a future operator release renames it — the pre-created claims above
+    ## have to match it exactly or the StatefulSet makes its own.
+    volumeName: clickhouse-storage-volume
+
   resources:
     requests:
       cpu: "2"
@@ -126,13 +219,21 @@ clickhouse:
 
   podTemplate:
     ## See the keeper.podTemplate comments above for what each field does.
-    topologyZoneKey: kubernetes.io/hostname
-    spreadPolicy: ScheduleAnyway
-    nodeHostnameKey: ""
+    topologyZoneKey: topology.kubernetes.io/zone
+    nodeHostnameKey: kubernetes.io/hostname
     labels: {}
     annotations: {}
+    # annotations:
+    #   karpenter.sh/do-not-disrupt: "true"
     nodeSelector: {}
+    # nodeSelector:
+    #   node-role.kubernetes.io/database: "true"
     tolerations: []
+    # tolerations:
+    #   - key: dedicated
+    #     operator: Equal
+    #     value: clickhouse
+    #     effect: NoSchedule
     affinity: {}
     topologySpreadConstraints: []
     volumes: []
@@ -165,6 +266,16 @@ clickhouse:
       limits:
         cpu: "1"
         memory: 1Gi
+    ## Scheduling for the probe Pod. The CRD exposes only nodeSelector here —
+    ## there is no tolerations or affinity field, so a probe cannot be placed on
+    ## a tainted node the ClickHouse pods themselves tolerate.
+    # nodeSelector:
+    #   node-role.kubernetes.io/database: "true"
+    nodeSelector: {}
+    labels: {}
+    annotations: {}
+    # annotations:
+    #   karpenter.sh/do-not-disrupt: "true"
 
   ## Server / user settings (official operator settings block)
   settings:
@@ -260,6 +371,10 @@ clickhouse:
 # ---------------------------------------------------------------------------
 rotel:
   enabled: false
+  ## Override the collector's resource name (default: <fullname>-rotel).
+  ## This is the OTLP endpoint hostname apps point at, so changing it on a live
+  ## install means repointing every SDK.
+  name: ""
   replicas: 1
 
   image:
@@ -409,13 +524,58 @@ rotel:
     type: ClusterIP
     annotations: {}
 
+  ## Collector Pod scheduling. The collector is stateless and sits on the OTLP
+  ## hot path, so it usually wants to be near the workloads sending telemetry
+  ## rather than pinned to the database nodes.
   podLabels: {}
+  # podLabels:
+  #   tier: telemetry
   podAnnotations: {}
+  # podAnnotations:
+  #   prometheus.io/scrape: "false"
+  #   karpenter.sh/do-not-disrupt: "true"      # avoid dropping in-flight batches
   nodeSelector: {}
+  # nodeSelector:
+  #   node-role.kubernetes.io/observability: "true"
   tolerations: []
+  # tolerations:
+  #   - key: dedicated
+  #     operator: Equal
+  #     value: observability
+  #     effect: NoSchedule
   affinity: {}
+  # affinity:
+  #   podAntiAffinity:
+  #     preferredDuringSchedulingIgnoredDuringExecution:
+  #       - weight: 100
+  #         podAffinityTerm:
+  #           topologyKey: kubernetes.io/hostname
+  #           labelSelector:
+  #             matchLabels:
+  #               app.kubernetes.io/component: rotel
   extraArgs: []
   extraEnv: []
+
+  ## Scheduling for the schema (createSchema) and retention (manageTtl) Jobs.
+  ## They are short-lived helm hooks that talk to ClickHouse over HTTP, so they
+  ## normally belong wherever the ClickHouse pods are reachable. Give them the
+  ## database tolerations if that node pool is tainted — an unschedulable hook
+  ## Job blocks the whole `helm upgrade` until it times out.
+  jobs:
+    podLabels: {}
+    podAnnotations: {}
+    # podAnnotations:
+    #   sidecar.istio.io/inject: "false"       # a sidecar keeps the Job Running forever
+    nodeSelector: {}
+    # nodeSelector:
+    #   node-role.kubernetes.io/database: "true"
+    tolerations: []
+    # tolerations:
+    #   - key: dedicated
+    #     operator: Equal
+    #     value: clickhouse
+    #     effect: NoSchedule
+    affinity: {}
 
 # ---------------------------------------------------------------------------
 # Optional in-cluster TLS (requires cert-manager + issuer)

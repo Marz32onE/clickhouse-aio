@@ -1,5 +1,9 @@
 {{/*
 Expand the name of the chart.
+
+Feeds app.kubernetes.io/name, which is part of the selector labels below, so
+nameOverride is an install-time decision: a Deployment's spec.selector is
+immutable and an upgrade that changes it is rejected outright.
 */}}
 {{- define "cluster.name" -}}
 {{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" }}
@@ -7,6 +11,12 @@ Expand the name of the chart.
 
 {{/*
 Create a default fully qualified app name.
+
+This is the base name every resource hangs off: the KeeperCluster and
+ClickHouseCluster CRs (official examples give both the same name, which is what
+makes the operator's <name>-keeper-headless / <name>-clickhouse-headless
+services line up), the rotel Deployment/Service/Jobs, the generated password
+Secret, and the pre-created per-replica PVCs.
 */}}
 {{- define "cluster.fullname" -}}
 {{- if .Values.fullnameOverride }}
@@ -22,26 +32,20 @@ Create a default fully qualified app name.
 {{- end }}
 
 {{/*
-Shared base name for CRs. Official examples use the same metadata.name for
-KeeperCluster and ClickHouseCluster; the operator then creates
-  <name>-keeper-headless / <name>-clickhouse-headless services.
-*/}}
-{{- define "cluster.clusterName" -}}
-{{- default (include "cluster.fullname" .) .Values.clusterName | trunc 63 | trimSuffix "-" }}
-{{- end }}
-
-{{/*
-ClickHouse cluster resource name
+ClickHouseCluster resource name. Renames only this CR — keeper.name is separate,
+so setting one and not the other splits the pair the operator's headless service
+names are derived from.
 */}}
 {{- define "cluster.clickhouseName" -}}
-{{- default (include "cluster.clusterName" .) .Values.clickhouse.name | trunc 63 | trimSuffix "-" }}
+{{- default (include "cluster.fullname" .) .Values.clickhouse.name | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
 {{/*
-Keeper cluster resource name (defaults to same base name as ClickHouseCluster)
+KeeperCluster resource name (defaults to the same base name as the
+ClickHouseCluster)
 */}}
 {{- define "cluster.keeperName" -}}
-{{- default (include "cluster.clusterName" .) .Values.keeper.name | trunc 63 | trimSuffix "-" }}
+{{- default (include "cluster.fullname" .) .Values.keeper.name | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
 {{/*
@@ -101,7 +105,50 @@ TLS certificate secret names
 Rotel collector resource name
 */}}
 {{- define "cluster.rotelName" -}}
-{{- printf "%s-rotel" (include "cluster.clusterName" .) | trunc 63 | trimSuffix "-" }}
+{{- if .Values.rotel.name }}
+{{- .Values.rotel.name | trunc 63 | trimSuffix "-" }}
+{{- else }}
+{{- printf "%s-rotel" (include "cluster.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+{{- end }}
+
+{{/*
+Pod metadata for the rotel schema/retention Jobs. Emits the `metadata:` key
+itself, since the labels below are always present.
+*/}}
+{{- define "cluster.rotelJobPodMetadata" -}}
+{{- $jobs := .root.Values.rotel.jobs | default dict -}}
+metadata:
+  labels:
+    {{- include "cluster.selectorLabels" .root | nindent 4 }}
+    app.kubernetes.io/component: {{ .component }}
+    {{- with $jobs.podLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with $jobs.podAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}
+
+{{/*
+Scheduling block shared by the rotel schema/retention Jobs. Emits nothing when
+none of the three is set.
+*/}}
+{{- define "cluster.rotelJobScheduling" -}}
+{{- $jobs := .Values.rotel.jobs | default dict -}}
+{{- with $jobs.nodeSelector }}
+nodeSelector:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+{{- with $jobs.tolerations }}
+tolerations:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+{{- with $jobs.affinity }}
+affinity:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
 {{- end }}
 
 {{/*
@@ -260,39 +307,6 @@ ClickHouse default-user secret)
 {{- else }}
 {{- .Values.clickhouse.defaultUser.existingSecretKey | default "password" }}
 {{- end }}
-{{- end }}
-
-{{/*
-Spread constraints for a podTemplate.
-
-The operator turns topologyZoneKey into a required (DoNotSchedule) constraint
-plus a preferred PodAntiAffinity, and merges user constraints into that default
-by topologyKey. Relaxing it therefore means repeating topologyZoneKey with a
-different whenUnsatisfiable, so spreadPolicy derives that entry instead of
-making callers keep two values in sync. labelSelector is deliberately omitted:
-the operator fills in the pod labels, including the shard id, and a constraint
-with an empty selector matches nothing.
-
-An explicit topologySpreadConstraints list takes over completely.
-
-Usage: include "cluster.topologySpreadConstraints" (dict "podTemplate" .Values.<component>.podTemplate)
-*/}}
-{{- define "cluster.topologySpreadConstraints" -}}
-{{- $pt := .podTemplate -}}
-{{- $policy := $pt.spreadPolicy | default "" -}}
-{{- if and $policy (not (has $policy (list "ScheduleAnyway" "DoNotSchedule"))) -}}
-{{- fail (printf "podTemplate.spreadPolicy must be ScheduleAnyway, DoNotSchedule or empty, got %q" $policy) -}}
-{{- end -}}
-{{- if $pt.topologySpreadConstraints -}}
-{{- toYaml $pt.topologySpreadConstraints -}}
-{{- else if $policy -}}
-{{- if not $pt.topologyZoneKey -}}
-{{- fail "podTemplate.spreadPolicy needs podTemplate.topologyZoneKey set — it names the domain to spread across" -}}
-{{- end -}}
-- maxSkew: 1
-  topologyKey: {{ $pt.topologyZoneKey }}
-  whenUnsatisfiable: {{ $policy }}
-{{- end -}}
 {{- end }}
 
 {{/*
@@ -506,5 +520,18 @@ operator ships are not registered yet.
 {{- if .Values.argocd.enabled }}
 argocd.argoproj.io/sync-wave: {{ .Values.argocd.syncWave | quote }}
 argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+{{- end }}
+{{- end }}
+
+{{/*
+ArgoCD ordering for the pre-created per-replica PVCs: one wave earlier than the
+CRs, because a StatefulSet only adopts a claim that already exists when it
+creates the Pod. No SkipDryRunOnMissingResource — a PVC is a core kind that is
+always registered. Plain `helm install` needs no equivalent: its own kind
+ordering puts PersistentVolumeClaim ahead of custom resources.
+*/}}
+{{- define "cluster.argocdPvcAnnotations" -}}
+{{- if .Values.argocd.enabled }}
+argocd.argoproj.io/sync-wave: {{ sub (int .Values.argocd.syncWave) 1 | quote }}
 {{- end }}
 {{- end }}

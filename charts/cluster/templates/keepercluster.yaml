@@ -58,9 +58,9 @@ spec:
     affinity:
       {{- toYaml . | nindent 6 }}
     {{- end }}
-    {{- with include "cluster.topologySpreadConstraints" (dict "podTemplate" .Values.keeper.podTemplate) }}
+    {{- with .Values.keeper.podTemplate.topologySpreadConstraints }}
     topologySpreadConstraints:
-      {{- . | nindent 6 }}
+      {{- toYaml . | nindent 6 }}
     {{- end }}
   {{- $settings := deepCopy (.Values.keeper.settings | default dict) }}
   {{- if .Values.tls.enabled }}

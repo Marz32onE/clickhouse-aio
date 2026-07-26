@@ -22,12 +22,12 @@ spec:
   backoffLimit: 10
   activeDeadlineSeconds: 600
   template:
-    metadata:
-      labels:
-        {{- include "cluster.selectorLabels" . | nindent 8 }}
-        app.kubernetes.io/component: rotel-ttl
+    {{- include "cluster.rotelJobPodMetadata" (dict "root" . "component" "rotel-ttl") | nindent 4 }}
     spec:
       restartPolicy: OnFailure
+      {{- with include "cluster.rotelJobScheduling" . }}
+      {{- . | nindent 6 }}
+      {{- end }}
       containers:
         - name: apply-ttl
           image: {{ include "cluster.image" .Values.clickhouse.image | quote }}

@@ -21,12 +21,12 @@ spec:
   backoffLimit: 20
   activeDeadlineSeconds: 900
   template:
-    metadata:
-      labels:
-        {{- include "cluster.selectorLabels" . | nindent 8 }}
-        app.kubernetes.io/component: rotel-ddl
+    {{- include "cluster.rotelJobPodMetadata" (dict "root" . "component" "rotel-ddl") | nindent 4 }}
     spec:
       restartPolicy: OnFailure
+      {{- with include "cluster.rotelJobScheduling" . }}
+      {{- . | nindent 6 }}
+      {{- end }}
       initContainers:
         # Waits for ClickHouse and creates the target database.
         - name: create-database

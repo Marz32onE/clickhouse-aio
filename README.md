@@ -100,8 +100,9 @@ helm upgrade --install ch-aio . -n clickhouse \
 
 ### Dev / local cluster
 
-The defaults size for production. On kind/k3d/minikube, shrink the request and
-drop to a single replica so the pods fit on one node:
+The defaults size for production. On kind/k3d/minikube, shrink the request, drop
+to a single replica, and clear the two placement keys — a one-node cluster has
+no zone labels and cannot give each pod its own node:
 
 ```bash
 helm upgrade --install ch-aio . -n clickhouse --create-namespace \
@@ -111,8 +112,15 @@ helm upgrade --install ch-aio . -n clickhouse --create-namespace \
   --set cluster.clickhouse.resources.requests.memory=1Gi \
   --set cluster.clickhouse.persistence.size=20Gi \
   --set cluster.keeper.persistence.size=5Gi \
+  --set cluster.clickhouse.podTemplate.topologyZoneKey="" \
+  --set cluster.clickhouse.podTemplate.nodeHostnameKey="" \
+  --set cluster.keeper.podTemplate.topologyZoneKey="" \
+  --set cluster.keeper.podTemplate.nodeHostnameKey="" \
   --set cluster.clickhouse.defaultUser.password='devpass'
 ```
+
+With `replicas=1` the spread constraint is harmless, but `nodeHostnameKey` still
+has to go the moment you raise it above the node count.
 
 `keeper.replicas` cannot be changed after the first successful deploy, so pick
 1 (local) or 3 (production) up front.
@@ -148,6 +156,7 @@ kubectl exec -it -n clickhouse <clickhouse-pod> -- clickhouse-client
 | `cluster.clickhouse.replicas` | `3` | Each replica holds the full dataset |
 | `cluster.clickhouse.shards` | `1` | **Leave at 1** — see "Scaling path" |
 | `cluster.clickhouse.persistence.size` | `200Gi` | Per replica |
+| `cluster.clickhouse.persistence.perReplica` | `[]` | Per-replica StorageClass / size overrides |
 | `cluster.clickhouse.resources` | 2–4 CPU / 8–16Gi | Tune to node size |
 | `cluster.tls.enabled` | `false` | Needs cert-manager + an Issuer |
 | `cluster.rotel.enabled` | `true` | OTLP collector (traces/logs → ClickHouse) |
@@ -166,10 +175,9 @@ kubectl exec -it -n clickhouse <clickhouse-pod> -- clickhouse-client
 | `operator.controller.watchNamespaces` | `[clickhouse]` | Must equal the release namespace |
 | `cluster.clickhouse.tenants.users` | `[]` | Per-namespace read-only users |
 | `cluster.clickhouse.tenants.tables` | `[]` | Empty derives it from the enabled signals |
-| `cluster.*.podTemplate.topologyZoneKey` | `kubernetes.io/hostname` | Domain replicas spread across |
-| `cluster.*.podTemplate.spreadPolicy` | `ScheduleAnyway` | Or `DoNotSchedule` / `""` |
-| `cluster.*.podTemplate.nodeHostnameKey` | `""` | Non-empty = strict one pod per node |
-| `cluster.*.podTemplate.topologySpreadConstraints` | `[]` | Escape hatch; replaces `spreadPolicy` |
+| `cluster.*.podTemplate.topologyZoneKey` | `topology.kubernetes.io/zone` | Domain replicas spread across |
+| `cluster.*.podTemplate.nodeHostnameKey` | `kubernetes.io/hostname` | One pod per node; excess stay `Pending` |
+| `cluster.*.podTemplate.topologySpreadConstraints` | `[]` | Operator field; merges by `topologyKey` |
 
 Full knobs: `values.yaml` and `charts/cluster/values.yaml`.
 
@@ -334,46 +342,177 @@ not exist. Set an explicit list to override. `otel_traces_trace_id_ts` is never
 included: it holds only trace ids and timestamps, so there is nothing to filter
 on.
 
-### Replica placement
+### A different StorageClass per replica
 
-The operator derives scheduling rules from two keys rather than taking a raw
-pod spec. The chart defaults to best-effort spreading **across nodes**, so it
-works without zone labels and a cluster with fewer nodes than replicas still
-schedules.
-
-- `topologyZoneKey` — the operator emits a **required** TopologySpreadConstraint
-  (`maxSkew: 1`, `DoNotSchedule`) plus a preferred PodAntiAffinity over this key.
-  Defaults to `kubernetes.io/hostname`.
-- `nodeHostnameKey` — a **required** PodAntiAffinity, at most one pod per node
-  regardless of shard. Excess pods stay `Pending`. The chart leaves this empty:
-  user-supplied `affinity` is *appended* to operator defaults, so a required rule
-  from this key cannot be relaxed afterwards.
-- `spreadPolicy` — chart-level, not an operator field. Renders the constraint
-  that relaxes (or keeps) the operator's default over `topologyZoneKey`:
-  `ScheduleAnyway`, `DoNotSchedule`, or `""` to emit nothing.
-- `topologySpreadConstraints` — the raw operator field, merged into its defaults
-  **by `topologyKey`**. A non-empty list replaces whatever `spreadPolicy` would
-  render. Omit `labelSelector` on an entry that targets `topologyZoneKey`: the
-  operator fills in the pod labels (including the shard id), and a constraint
-  with an empty selector matches nothing.
-
-Spread across AZs instead — one value:
+The CRD carries one `dataVolumeClaimSpec` for the whole cluster, so the operator
+cannot vary storage per replica. It does create **one StatefulSet per replica**
+with a deterministic claim name, though, and a StatefulSet adopts a claim that
+already carries that name without comparing its StorageClass against the
+template. `cluster.clickhouse.persistence.perReplica` pre-creates those claims:
 
 ```yaml
 cluster:
   clickhouse:
-    podTemplate:
-      topologyZoneKey: topology.kubernetes.io/zone
+    persistence:
+      storageClassName: standard-ssd    # every replica not listed below
+      size: 200Gi
+      perReplica:
+        - replica: 0
+          storageClassName: fast-nvme
+        - replica: 1
+          storageClassName: standard-ssd
+          size: 500Gi
 ```
 
-Strict placement (one pod per node, `Pending` when nodes run out):
+Rendered name: `clickhouse-storage-volume-<clickhouseName>-clickhouse-<shard>-<replica>-0`.
+The chart rejects a replica or shard index outside the configured counts and a
+pair claimed twice, so a typo cannot silently leave the StatefulSet to create
+its own claim from the template.
+
+**The cluster name has to stay short.** The operator caps a StatefulSet name at
+63 characters and, past that, shortens the middle and splices in a hash — a
+50-character cluster name produces `<name>-cli-7215-0-0`, not
+`<name>-clickhouse-0-0`. The predicted claim would then belong to no
+StatefulSet, and the real one would quietly build its own on the default
+StorageClass. The chart refuses to render in that case; keep the name
+(`<release>-cluster`, or `cluster.fullnameOverride` / `clickhouse.name`) at
+**48 characters or fewer** for a single-digit shard and replica index. The
+operator itself gives up entirely somewhere past ~52 characters, where the
+`<name>-clickhouse` label it applies exceeds 63 bytes and reconcile fails.
+
+Ordering is the whole trick — the claim has to exist before the operator creates
+the StatefulSet. The PVCs sync one ArgoCD wave ahead of the CRs
+(`syncWave - 1`), and a plain `helm install` gets it from Helm's own kind
+ordering, which puts `PersistentVolumeClaim` ahead of custom resources.
+
+Two things to know before using it. The claims carry
+`helm.sh/resource-policy: keep`, so `helm uninstall` leaves them behind — unlike
+operator-created claims they would otherwise be deleted with the release, taking
+the data. And a `size` change here never reaches a claim that already exists;
+expand it with `kubectl patch pvc` instead.
+
+Worth doing only when the replicas are **deliberately** asymmetric — a cold
+replica kept for backups, say. ClickHouse replication assumes comparable
+hardware, and rotel writes through the headless Service, so a slower replica
+both lags on merges and still serves its share of queries.
+
+### Pod scheduling and naming
+
+Every pod the chart is responsible for takes `nodeSelector`, `tolerations`,
+`affinity`, labels and annotations. `values.yaml` carries a commented example
+for each.
+
+| Pod | Values key |
+|-----|------------|
+| Keeper | `cluster.keeper.podTemplate.*` |
+| ClickHouse server | `cluster.clickhouse.podTemplate.*` |
+| Version-probe Job | `cluster.clickhouse.versionProbe.*` — **`nodeSelector` only**, the CRD has no tolerations or affinity field |
+| Rotel collector | `cluster.rotel.{nodeSelector,tolerations,affinity,podLabels,podAnnotations}` |
+| Schema + TTL Jobs | `cluster.rotel.jobs.*` |
+| Operator manager | `operator.manager.{nodeSelector,tolerations,affinity}` |
+
+Two traps worth naming. A `nodeSelector` alone will not place a pod on a
+**tainted** node — pair it with tolerations. And the schema/TTL Jobs are helm
+hooks, so one that can never schedule blocks the whole `helm upgrade` until it
+times out; give them the same tolerations as the database nodes they talk to.
+
+Names default to `<release>-cluster` — the two CRs, the rotel
+Deployment/Service/Jobs, the generated password Secret and the per-replica PVCs
+all derive from it.
+
+| Key | Renames | Safe to change later? |
+|-----|---------|-----------------------|
+| `cluster.fullnameOverride` | all of the above, together | Yes on paper, but the operator reads the new CR as a different cluster |
+| `cluster.nameOverride` | the same names, **plus `app.kubernetes.io/name`** | **No — install-time only** |
+| `cluster.clickhouse.name` | the ClickHouseCluster CR and the per-replica PVCs | No |
+| `cluster.keeper.name` | the KeeperCluster CR | No |
+| `cluster.rotel.name` | the collector Deployment/Service/Jobs | Only by repointing every SDK |
+
+`nameOverride` is the one to be careful with: `app.kubernetes.io/name` is a
+selector label, and a Deployment's `spec.selector` is immutable, so changing it
+on a live release fails the upgrade until the rotel Deployment is deleted by
+hand. `fullnameOverride` leaves the labels alone.
+
+`clickhouse.name` and `keeper.name` are independent — setting one and not the
+other splits a pair the official examples keep matching, and the collector's
+exporter endpoint follows the ClickHouse one.
+
+### Replica placement
+
+The operator derives scheduling rules from two keys rather than taking a raw pod
+spec. Both are at the values its
+[API reference](https://clickhouse.com/docs/products/kubernetes-operator/reference/api-reference)
+recommends:
+
+| Key | Default | Operator emits |
+|-----|---------|----------------|
+| `topologyZoneKey` | `topology.kubernetes.io/zone` | **required** TopologySpreadConstraint (`maxSkew: 1`, `DoNotSchedule`) + **preferred** PodAntiAffinity |
+| `nodeHostnameKey` | `kubernetes.io/hostname` | **required** PodAntiAffinity across every pod of the cluster — one per node, regardless of shard |
+
+They answer different questions. `topologyZoneKey` is *balance* — spread the
+replicas of one shard evenly over failure domains. `nodeHostnameKey` is
+*exclusion* — never put two pods of this cluster on one machine, whatever the
+skew says. Setting both is the whole of the official HA recipe; the docs call it
+"pods across availability zones **without manual affinity rules**".
+
+Fewer zones than replicas is **not** a problem: `maxSkew: 1` allows several
+replicas per domain, still evenly balanced. What does strand pods is a node
+carrying no zone label at all (a `DoNotSchedule` constraint skips it) or
+`nodeHostnameKey` on a cluster with fewer nodes than replicas.
+
+**Which of the two you can loosen afterwards is not symmetric.** The API
+reference words the two escape hatches differently, and the difference is load
+bearing:
+
+| Field | Interaction with the operator's own rules |
+|-------|-------------------------------------------|
+| `topologySpreadConstraints` | *merged by `topologyKey`* — repeat `topologyZoneKey`'s value and your entry replaces the generated one |
+| `affinity` | *appended; scheduling term lists are concatenated* — nothing can be subtracted |
+
+So the zone rule is adjustable and the node rule is not. To relax the spread,
+write the operator's field out in full:
 
 ```yaml
 cluster:
   clickhouse:
     podTemplate:
-      nodeHostnameKey: kubernetes.io/hostname
-      spreadPolicy: ""
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+```
+
+Omit `labelSelector` on an entry targeting `topologyZoneKey`: the operator fills
+in the pod labels, including the shard id, and a constraint with an empty
+selector matches nothing.
+
+`nodeHostnameKey` has no equivalent — its rule is a PodAntiAffinity, so clear
+the key itself or live with it. Single-node clusters need both keys cleared, as
+in "Dev / local cluster" above.
+
+The chart deliberately offers **no shorthand** for loosening the spread. Doing
+so is a step away from the posture the operator's docs recommend, so it is
+spelled out as the operator's own field rather than hidden behind a
+chart-invented value.
+
+Spread across nodes rather than AZs — one value, useful on a cluster with no
+zone labels:
+
+```yaml
+cluster:
+  clickhouse:
+    podTemplate:
+      topologyZoneKey: kubernetes.io/hostname
+```
+
+Drop exclusive node occupancy, keeping the zone spread (replicas may then share
+a node):
+
+```yaml
+cluster:
+  clickhouse:
+    podTemplate:
+      nodeHostnameKey: ""
 ```
 
 Switching an existing cluster from strict to best-effort can deadlock: the

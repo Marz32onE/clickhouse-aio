@@ -32,6 +32,10 @@
 operator:
   enabled: true
 
+  ## Naming for the operator's own objects (Deployment, ServiceAccount, RBAC).
+  nameOverride: ""
+  fullnameOverride: ""
+
   ## Namespaces the operator reconciles. Empty means cluster-wide, which
   ## requires rbac.namespaced=false. With namespaced RBAC this must list
   ## exactly the release namespace — the operator would otherwise watch
@@ -61,7 +65,42 @@ operator:
       limits:
         cpu: 500m
         memory: 256Mi
-    # Drop the chart's multi-arch affinity pin if your nodes are homogeneous
+    ## Annotations on the Deployment object itself, not on its Pods.
+    annotations: {}
+    # annotations:
+    #   argocd.argoproj.io/sync-options: Prune=false
+
+    ## Annotations and labels on the manager Pod. Note the nesting: this is
+    ## `manager.pod.annotations`, not a flat podAnnotations — the subchart keeps
+    ## Deployment metadata (above) and Pod metadata (here) apart.
+    ##
+    ## Four annotation keys are silently dropped if you set them here, because
+    ## the subchart owns them: kubectl.kubernetes.io/default-container, and
+    ## prometheus.io/{scrape,path,port}. The prometheus trio is driven by
+    ## operator.prometheus.scraping_annotations below (on by default), so turn
+    ## that off rather than trying to override it here.
+    pod:
+      annotations: {}
+      # annotations:
+      #   karpenter.sh/do-not-disrupt: "true"
+      #   vault.hashicorp.com/agent-inject: "false"
+      labels: {}
+      # labels:
+      #   tier: control-plane
+
+    ## Manager Pod scheduling. It only talks to the API server, so it does not
+    ## need to sit on the database nodes.
+    nodeSelector: {}
+    # nodeSelector:
+    #   node-role.kubernetes.io/control-plane: ""
+    tolerations: []
+    # tolerations:
+    #   - key: node-role.kubernetes.io/control-plane
+    #     operator: Exists
+    #     effect: NoSchedule
+    ## The subchart ships a required nodeAffinity pinning the manager to known
+    ## arch/os values. Setting this key replaces it outright, so repeat what you
+    ## still want. Drop it to {} on homogeneous nodes.
     # affinity: {}
 
   rbac:
@@ -108,6 +147,19 @@ operator:
 cluster:
   enabled: true
 
+  ## Naming. Everything defaults to <release>-cluster: the two CRs, the rotel
+  ## Deployment/Service/Jobs, the generated password Secret and the per-replica
+  ## PVCs all hang off it, so an override renames the OTLP endpoint and the
+  ## password Secret along with them.
+  ##
+  ## nameOverride is install-time only — it also sets app.kubernetes.io/name,
+  ## which is a selector label, and a Deployment's spec.selector is immutable.
+  ## Changing it on a live release fails the upgrade until the rotel Deployment
+  ## is deleted by hand. fullnameOverride does not touch the labels.
+  nameOverride: ""
+  fullnameOverride: ""
+  # fullnameOverride: analytics
+
   commonLabels:
     environment: production
     app.kubernetes.io/part-of: clickhouse-aio
@@ -135,16 +187,32 @@ cluster:
         cpu: "1"
         memory: 2Gi
     podTemplate:
-      ## Domain replicas are balanced across. Node-level by default; set
-      ## "topology.kubernetes.io/zone" to spread across AZs instead.
-      topologyZoneKey: kubernetes.io/hostname
-      ## ScheduleAnyway (best effort) | DoNotSchedule (strict, excess replicas
-      ## stay Pending) | "" (no constraint emitted)
-      spreadPolicy: ScheduleAnyway
-      ## Empty = best-effort placement. Setting it makes the operator emit a
-      ## *required* PodAntiAffinity (one pod per node, excess pods Pending)
-      ## that spreadPolicy cannot relax.
-      nodeHostnameKey: ""
+      ## topologyZoneKey / nodeHostnameKey are left at the subchart defaults,
+      ## which are the values the operator's API reference recommends: spread
+      ## across topology.kubernetes.io/zone, one pod per kubernetes.io/hostname.
+      ## Both need the node labels to exist, and nodeHostnameKey needs at least
+      ## as many nodes as replicas — see charts/cluster/values.yaml, and "Dev /
+      ## local cluster" in the README for a single-node override. To loosen the
+      ## spread, set podTemplate.topologySpreadConstraints (the operator's own
+      ## field) rather than looking for a chart-level shorthand.
+      ##
+      ## Scheduling. nodeSelector alone does not get a pod onto a tainted node —
+      ## pair it with tolerations. affinity is appended to the operator's own
+      ## rules rather than replacing them.
+      nodeSelector: {}
+      # nodeSelector:
+      #   node-role.kubernetes.io/database: "true"
+      tolerations: []
+      # tolerations:
+      #   - key: dedicated
+      #     operator: Equal
+      #     value: clickhouse
+      #     effect: NoSchedule
+      affinity: {}
+      labels: {}
+      annotations: {}
+      # annotations:
+      #   karpenter.sh/do-not-disrupt: "true"   # keep the autoscaler off a quorum member
 
   # ---- ClickHouse servers ---------------------------------------------------
   clickhouse:
@@ -166,6 +234,18 @@ cluster:
         - ReadWriteOnce
       ## Per-replica; plan for ~6–12 months of compressed analytics data
       size: 200Gi
+      ## Give individual replicas their own StorageClass or size. The chart
+      ## pre-creates those claims under the name the StatefulSet would generate,
+      ## one ArgoCD wave ahead of the CRs, and the StatefulSet adopts them.
+      ## Only for deliberately asymmetric replicas — ClickHouse replication
+      ## assumes comparable hardware. See charts/cluster/values.yaml.
+      perReplica: []
+      # perReplica:
+      #   - replica: 0
+      #     storageClassName: fast-nvme
+      #   - replica: 1
+      #     storageClassName: standard-ssd
+      #     size: 500Gi
     resources:
       requests:
         cpu: "2"
@@ -174,10 +254,27 @@ cluster:
         cpu: "4"
         memory: 16Gi
     podTemplate:
-      ## See cluster.keeper.podTemplate above for what each field does.
-      topologyZoneKey: kubernetes.io/hostname
-      spreadPolicy: ScheduleAnyway
-      nodeHostnameKey: ""
+      ## Placement keys left at the subchart defaults — see keeper above.
+      nodeSelector: {}
+      # nodeSelector:
+      #   node-role.kubernetes.io/database: "true"
+      tolerations: []
+      # tolerations:
+      #   - key: dedicated
+      #     operator: Equal
+      #     value: clickhouse
+      #     effect: NoSchedule
+      affinity: {}
+      labels: {}
+      annotations: {}
+
+    ## Version-detection Job the operator runs before each (re)deploy. The CRD
+    ## exposes only nodeSelector for it — no tolerations, so it cannot reach a
+    ## tainted node pool that the servers themselves tolerate.
+    versionProbe:
+      nodeSelector: {}
+      annotations: {}
+      labels: {}
 
     defaultUser:
       ## Prefer: --set cluster.clickhouse.defaultUser.password='...'
@@ -259,6 +356,38 @@ cluster:
       minReplicas: 1
       maxReplicas: 5
       targetCPUUtilizationPercentage: 75
+    ## Collector Pod. Stateless and on the OTLP hot path, so it usually belongs
+    ## near the workloads sending telemetry rather than on the database nodes.
+    podLabels: {}
+    podAnnotations: {}
+    # podAnnotations:
+    #   prometheus.io/scrape: "false"
+    nodeSelector: {}
+    # nodeSelector:
+    #   node-role.kubernetes.io/observability: "true"
+    tolerations: []
+    # tolerations:
+    #   - key: dedicated
+    #     operator: Equal
+    #     value: observability
+    #     effect: NoSchedule
+    affinity: {}
+    ## Schema (createSchema) and retention (manageTtl) hook Jobs. Give them the
+    ## database tolerations if that node pool is tainted — a hook Job that can
+    ## never schedule blocks the whole `helm upgrade` until it times out.
+    jobs:
+      podLabels: {}
+      podAnnotations: {}
+      # podAnnotations:
+      #   sidecar.istio.io/inject: "false"     # a sidecar keeps the Job Running forever
+      nodeSelector: {}
+      tolerations: []
+      # tolerations:
+      #   - key: dedicated
+      #     operator: Equal
+      #     value: clickhouse
+      #     effect: NoSchedule
+      affinity: {}
     exporter:
       ## HA profile (2 replicas): replicate otel tables across the cluster
       engine: ReplicatedMergeTree

@@ -70,9 +70,9 @@ spec:
     affinity:
       {{- toYaml . | nindent 6 }}
     {{- end }}
-    {{- with include "cluster.topologySpreadConstraints" (dict "podTemplate" .Values.clickhouse.podTemplate) }}
+    {{- with .Values.clickhouse.podTemplate.topologySpreadConstraints }}
     topologySpreadConstraints:
-      {{- . | nindent 6 }}
+      {{- toYaml . | nindent 6 }}
     {{- end }}
     {{- with .Values.clickhouse.podTemplate.volumes }}
     volumes:
@@ -82,15 +82,33 @@ spec:
   additionalPorts:
     {{- toYaml . | nindent 4 }}
   {{- end }}
-  {{- with .Values.clickhouse.versionProbe.resources }}
+  {{- $probe := .Values.clickhouse.versionProbe | default dict }}
+  {{- if or $probe.resources $probe.nodeSelector $probe.labels $probe.annotations }}
   versionProbeTemplate:
     spec:
       template:
+        {{- if or $probe.labels $probe.annotations }}
+        metadata:
+          {{- with $probe.labels }}
+          labels:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $probe.annotations }}
+          annotations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        {{- end }}
         spec:
+          {{- with $probe.resources }}
           containers:
             - name: version-probe
               resources:
                 {{- toYaml . | nindent 16 }}
+          {{- end }}
+          {{- with $probe.nodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
   {{- end }}
   settings:
     enableDatabaseSync: {{ .Values.clickhouse.settings.enableDatabaseSync }}
