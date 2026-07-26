@@ -7,6 +7,12 @@ VALUES ?= values.yaml
 
 deps:
 	helm dependency update
+	# helm dependency update repackages both vendored subcharts into
+	# charts/*.tgz, right next to the source directories they came from. Helm
+	# then finds two charts of the same name and which one wins is not stable,
+	# so a stale archive silently installs an older chart. The unpacked
+	# directories are authoritative here — drop the archives.
+	rm -f charts/*.tgz
 
 lint: deps
 	helm lint .
