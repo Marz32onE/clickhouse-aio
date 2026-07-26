@@ -35,9 +35,9 @@ spec:
     imagePullPolicy: {{ .Values.clickhouse.image.pullPolicy }}
     resources:
       {{- toYaml .Values.clickhouse.resources | nindent 6 }}
-    {{- with include "cluster.clickhouseEnv" . }}
+    {{- with .Values.clickhouse.containerTemplate.env }}
     env:
-      {{- . | nindent 6 }}
+      {{- toYaml . | nindent 6 }}
     {{- end }}
     {{- with .Values.clickhouse.containerTemplate.volumeMounts }}
     volumeMounts:
@@ -131,8 +131,8 @@ spec:
     extraConfig:
       {{- toYaml . | nindent 6 }}
     {{- end }}
-    {{- with include "cluster.extraUsersConfig" . }}
+    {{- with .Values.clickhouse.settings.extraUsersConfig }}
     extraUsersConfig:
-      {{- . | nindent 6 }}
+      {{- toYaml . | nindent 6 }}
     {{- end }}
 {{- end }}

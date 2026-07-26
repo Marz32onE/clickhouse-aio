@@ -295,66 +295,65 @@ clickhouse:
       # Prometheus metrics need no config here: the operator exposes
       # port 9363 automatically (protocols.prometheus).
 
-    ## Merged on top of the users generated from clickhouse.tenants below, so
-    ## an entry here with the same user name replaces the generated one.
-    ## Note the `grants` shape: a single key holding a list of query strings.
-    ## A list of {query: ...} maps renders as repeated <grants> XML elements and
-    ## ClickHouse honours only the first, silently dropping the rest.
+    ## Users, profiles and row policies, passed through to the operator
+    ## verbatim. This is the only user mechanism the chart offers — grants say
+    ## which tables a user may read, and a per-table `filter` narrows that to a
+    ## subset of rows. A grant alone always means the *whole* table.
+    ##
+    ## Shape notes, both of them easy to get wrong:
+    ##   * `grants` is one `query` key holding a list. A list of {query: ...}
+    ##     maps renders as repeated <grants> XML elements and ClickHouse honours
+    ##     only the first, silently dropping the rest.
+    ##   * a table under `databases` with no `filter` is not a restriction — the
+    ##     filter is what limits the rows, the grant is what allows the table.
+    ##
+    ## Passwords come from container env (see containerTemplate.env below), so
+    ## they reach neither the CR nor preprocessed_configs/users.xml. The chart
+    ## generates no Secret for these users: point secretKeyRef at your own.
+    ##
+    ## Users defined here are read-only at runtime — adding a table later means
+    ## editing this and running `helm upgrade`, not a GRANT statement.
+    ##
+    ## When this outgrows the file, split it into a second values file and pass
+    ## both with `-f` — the operator cannot source users from a ConfigMap or
+    ## Secret, so the values layer is the only place the split can happen.
     extraUsersConfig: {}
     # extraUsersConfig:
+    #   profiles:
+    #     readonly_user:
+    #       readonly: 1
     #   users:
-    #     app:
-    #       password_sha256_hex: "..."
-    #       profile: default
+    #     ## Whole-table reader
+    #     reporter:
+    #       password: {"@from_env": CH_REPORTER_PASSWORD, "@hide_in_preprocessed": true}
+    #       profile: readonly_user
+    #       networks: {ip: "::/0"}
     #       grants:
     #         query:
-    #           - "GRANT SELECT, INSERT ON app_db.*"
-    #   profiles:
-    #     readonly:
-    #       readonly: 1
-
-  ## ---------------------------------------------------------------------
-  ## Tenants: read-only users that can only see rows belonging to their own
-  ## Kubernetes namespaces, enforced by a ClickHouse row policy.
-  ##
-  ## The namespace has to be on the telemetry itself — rotel does not enrich
-  ## spans with Kubernetes metadata. Instrumented workloads should publish it,
-  ## e.g. via the downward API:
-  ##   env:
-  ##     - name: POD_NAMESPACE
-  ##       valueFrom: {fieldRef: {fieldPath: metadata.namespace}}
-  ##     - name: OTEL_RESOURCE_ATTRIBUTES
-  ##       value: k8s.namespace.name=$(POD_NAMESPACE)
-  ## Rows whose attribute is missing or unknown are visible to no tenant.
-  ## ---------------------------------------------------------------------
-  tenants:
-    ## Database holding the tables below. Defaults to rotel.exporter.database.
-    database: ""
-    ## ResourceAttributes key carrying the Kubernetes namespace.
-    namespaceAttribute: k8s.namespace.name
-    ## Tables tenants may read. Each one gets both the SELECT grant and the row
-    ## filter, so only add tables that have a ResourceAttributes column — a
-    ## granted table without a usable filter returns every tenant's rows.
-    ## otel_traces_trace_id_ts is deliberately absent: it holds only trace ids
-    ## and timestamps, so it cannot be filtered by namespace.
-    ## Empty derives the list from rotel.telemetry (traces and logs, each with
-    ## its own table prefix) — a signal that is off never gets a grant on a
-    ## table the DDL job did not create. Set an explicit list to override, e.g.
-    ##   tables: [otel_traces, otel_logs]
-    tables: []
-    ## Each user gets a Secret named <cluster>-tenant-<name>-password with a
-    ## generated password unless existingSecret or password is set.
-    users: []
-    # users:
-    #   - name: team_a               # ClickHouse identifier: [A-Za-z_][A-Za-z0-9_]*
-    #     namespaces: [team-a, team-a-staging]
-    #     ## Optional: bring your own Secret instead of a generated one
-    #     existingSecret: ""
-    #     existingSecretKey: password
-    #     ## Optional: fixed password (prefer --set over committing it)
-    #     password: ""
-    #     ## Optional: profile granting more than read-only
-    #     profile: tenant_readonly
+    #           - GRANT SELECT ON otel.otel_traces
+    #     ## Same grants, narrowed to one Kubernetes namespace by a row policy.
+    #     ## Requires the telemetry to carry the namespace itself — rotel does
+    #     ## not enrich spans, so instrumented workloads must publish it:
+    #     ##   env:
+    #     ##     - name: POD_NAMESPACE
+    #     ##       valueFrom: {fieldRef: {fieldPath: metadata.namespace}}
+    #     ##     - name: OTEL_RESOURCE_ATTRIBUTES
+    #     ##       value: k8s.namespace.name=$(POD_NAMESPACE)
+    #     ## Rows missing the attribute belong to no one and stay invisible.
+    #     team_a:
+    #       password: {"@from_env": CH_TEAM_A_PASSWORD, "@hide_in_preprocessed": true}
+    #       profile: readonly_user
+    #       networks: {ip: "::/0"}
+    #       databases:
+    #         otel:
+    #           otel_traces:
+    #             filter: "ResourceAttributes['k8s.namespace.name'] IN ('team-a')"
+    #           otel_logs:
+    #             filter: "ResourceAttributes['k8s.namespace.name'] IN ('team-a')"
+    #       grants:
+    #         query:
+    #           - GRANT SELECT ON otel.otel_traces
+    #           - GRANT SELECT ON otel.otel_logs
 
   ## Extra container ports. Port 9363 is reserved by the operator for
   ## Prometheus metrics — the validation webhook rejects it here.

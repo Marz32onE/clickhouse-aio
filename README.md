@@ -173,8 +173,7 @@ kubectl exec -it -n clickhouse <clickhouse-pod> -- clickhouse-client
 | `cluster.rotel.manageTtl` | `true` | Re-apply `ttl` to existing tables on upgrade |
 | `operator.rbac.namespaced` | `true` | Role instead of ClusterRole |
 | `operator.controller.watchNamespaces` | `[clickhouse]` | Must equal the release namespace |
-| `cluster.clickhouse.tenants.users` | `[]` | Per-namespace read-only users |
-| `cluster.clickhouse.tenants.tables` | `[]` | Empty derives it from the enabled signals |
+| `cluster.clickhouse.settings.extraUsersConfig` | `reporter` | Users, profiles, row filters |
 | `cluster.*.podTemplate.topologyZoneKey` | `topology.kubernetes.io/zone` | Domain replicas spread across |
 | `cluster.*.podTemplate.nodeHostnameKey` | `kubernetes.io/hostname` | One pod per node; excess stay `Pending` |
 | `cluster.*.podTemplate.topologySpreadConstraints` | `[]` | Operator field; merges by `topologyKey` |
@@ -290,28 +289,43 @@ To manage clusters across several namespaces, set `operator.rbac.namespaced:
 false` and either list them in `watchNamespaces` or leave it empty for
 cluster-wide.
 
-### Per-namespace read-only users
+### ClickHouse users
 
-`cluster.clickhouse.tenants` generates ClickHouse users that can only read rows
-whose telemetry carries their own Kubernetes namespace:
+There is one mechanism: `cluster.clickhouse.settings.extraUsersConfig`, passed
+through to the operator verbatim. A user is a profile, a set of grants, and
+optionally a per-table row filter.
 
-```yaml
-cluster:
-  clickhouse:
-    tenants:
-      users:
-        - name: team_a                       # ClickHouse identifier
-          namespaces: [team-a, team-a-staging]
-        - name: team_b
-          namespaces: [team-b]
-          existingSecret: team-b-ch-password  # else one is generated
+| | Sees |
+|---|---|
+| grant, no filter | the **whole** table |
+| grant + filter | only the rows matching the filter |
+| no grant | nothing — `ACCESS_DENIED`, whatever the filters say |
+
+Grants are table- and column-level; they cannot express "these rows". Row
+filtering is a separate concept and lives under `databases.<db>.<table>.filter`.
+
+`values.yaml` carries a `reporter` user reading the otel tables in full, and a
+commented `team_a` showing the same grants narrowed to one Kubernetes namespace.
+Both hang off a shared `readonly_user` profile with `readonly: 1` plus memory,
+runtime and result-size ceilings.
+
+If the list outgrows `values.yaml`, split it into a second values file and pass
+both with `-f`. That is the only place the split can happen — the operator
+cannot source users from a ConfigMap or Secret, since its `externalSecret` field
+carries cluster secrets only.
+
+**Grants and filters are yours to keep in step.** A granted table with no filter
+entry returns **every** row — that is the one mistake worth re-reading the file
+for. `otel_traces_trace_id_ts` is never granted: it holds only trace ids and
+timestamps, so there is nothing to filter on.
+
+**Row policies do not leak between users.** They are created with
+`apply_to_all = 0` and bind only the users they name, so a whole-table reader is
+unaffected by another user's filter. Verify with:
+
+```sql
+SELECT name, apply_to_all, apply_to_list FROM system.row_policies
 ```
-
-Each user gets a `readonly` profile, a `SELECT` grant on the configured tables,
-and a row-policy filter on every one of them. The password is read from a Secret
-through `@from_env`, so it never lands in the CR or in
-`preprocessed_configs/users.xml`. Generated Secrets are named
-`<cluster>-tenant-<name>-password`.
 
 **The namespace has to be on the telemetry.** Rotel does not enrich spans with
 Kubernetes metadata, so instrumented workloads must publish it themselves:
@@ -324,23 +338,31 @@ env:
     value: k8s.namespace.name=$(POD_NAMESPACE)
 ```
 
-Rows missing the attribute belong to no tenant and are visible only to `default`.
+Rows missing the attribute match no filter and stay invisible to every scoped
+user.
 
-A tenant's `existingSecret` must exist before the upgrade. The password reaches
-ClickHouse as a container environment variable, so a missing Secret leaves the
-ClickHouse pods in `CreateContainerConfigError` rather than just disabling that
-one user.
+**Passwords come from Secrets you create.** The chart generates none for these
+users; each password is injected as container env and read back with
+`@from_env`, so it reaches neither the CR nor
+`preprocessed_configs/users.xml`. The Secret must exist **before** the upgrade —
+a missing one leaves every ClickHouse pod in `CreateContainerConfigError`, not
+just that user disabled. Rotating a password needs a pod restart, since env is
+fixed at container start.
 
-Grants and filters are generated from the same list and cannot drift apart,
-which matters more than it looks: a table a tenant can read but that carries no
-filter returns **every** tenant's rows.
+**Config-defined users are read-only at runtime.** Granting another table later
+means editing the file and running `helm upgrade`; a `GRANT` statement against a
+config-sourced user is rejected. Check what is actually loaded, and from where,
+with:
 
-`tenants.tables` is empty by default, which derives the list from the signals
-Rotel is actually storing, using each signal's table prefix — so a disabled
-signal or a renamed prefix never leaves a grant pointing at a table that does
-not exist. Set an explicit list to override. `otel_traces_trace_id_ts` is never
-included: it holds only trace ids and timestamps, so there is nothing to filter
-on.
+```sql
+SHOW CREATE USER reporter;
+SELECT name, storage FROM system.settings_profiles;
+SELECT user_name, inherit_profile FROM system.settings_profile_elements
+WHERE user_name IS NOT NULL;
+```
+
+`storage = users_xml` marks the ones this chart manages; anything else was
+created by hand with SQL and will not survive a cluster rebuild.
 
 ### A different StorageClass per replica
 
@@ -776,9 +798,9 @@ query results, silently:
   Hashing on `TraceId` keeps one trace's spans on a single shard.
 - Point the TTL Job at the local tables: `Distributed` rejects `MODIFY TTL`,
   mutations and `OPTIMIZE`.
-- Extend `clickhouse.tenants.tables` to the Distributed table. Row policies do
-  apply through it, but a granted table with no filter returns every tenant's
-  rows — grants and filters must stay generated from one list.
+- Point the user grants and row filters at the Distributed table. Policies do
+  apply through it, but a granted table with no filter returns every user's
+  rows, so both have to move together.
 
 Adding the layer later is cheap: `RENAME TABLE` is a metadata-only operation,
 so the migration is a rename plus a `CREATE TABLE`, not a data copy.

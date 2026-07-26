@@ -16,8 +16,11 @@
 *~
 
 # Secrets / local overrides
-secrets.yaml
-*-secrets.yaml
+# Anchored to the repo root on purpose: an unanchored *-secrets.yaml also
+# matches chart templates, and silently kept charts/cluster/templates/
+# tenant-secrets.yaml out of version control entirely.
+/secrets.yaml
+/*-secrets.yaml
 .env
 .env.*
 

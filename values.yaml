@@ -299,24 +299,137 @@ cluster:
           console: 1
         ## Prometheus metrics need no config here: the operator exposes
         ## port 9363 automatically (protocols.prometheus).
-      ## Optional app users (do not put plaintext passwords here)
-      extraUsersConfig: {}
+      ## ClickHouse users, profiles and row policies, passed through to the
+      ## operator verbatim. This is the only user mechanism the chart offers:
+      ##   grant, no filter -> the whole table
+      ##   grant + filter   -> only the rows matching the filter
+      ##   no grant         -> nothing, whatever the filters say
+      ## Grants are table/column level, so row scoping needs the per-table
+      ## `filter` under `databases` — it cannot be expressed with grants alone.
+      ##
+      ## Shape traps: `grants` is one `query` key holding a list (repeated
+      ## {query: ...} maps render as repeated <grants> elements and ClickHouse
+      ## honours only the first), and a table listed under `databases` without a
+      ## `filter` is not a restriction at all.
+      ##
+      ## Users defined here are read-only at runtime — granting another table
+      ## later means editing this and running `helm upgrade`, not GRANT.
+      extraUsersConfig:
+        profiles:
+          ## The `web` profile from the ClickHouse docs, verbatim:
+          ## https://clickhouse.com/docs/concepts/features/configuration/settings/settings-profiles
+          ##
+          ## Every value below is theirs. The chart previously carried numbers
+          ## picked by hand, including a max_memory_usage larger than the
+          ## container limit, which made it a no-op. The official set avoids the
+          ## problem by bounding rows, bytes read and query shape rather than
+          ## process memory, so it does not have to track resources.limits.
+          ##
+          ## `readonly: 1` at the end blocks writes and also freezes every
+          ## setting in the session: a SET is rejected with
+          ## "Cannot modify '<name>' setting in readonly mode" (code 164),
+          ## before any constraint is consulted. That is why there is no
+          ## `constraints` block — under readonly it could never fire.
+          ##
+          ## Two of these are tight enough to notice. max_columns_to_read: 25
+          ## clears otel_traces (22 columns) and otel_logs (16) but not a join
+          ## of the two, and max_subquery_depth: 2 rejects deeply nested BI
+          ## queries. Raise those two if a dashboard starts failing.
+          readonly_user:
+            max_rows_to_read: 1000000000
+            max_bytes_to_read: 100000000000
+            max_rows_to_group_by: 1000000
+            group_by_overflow_mode: any
+            max_rows_to_sort: 1000000
+            max_bytes_to_sort: 1000000000
+            max_result_rows: 100000
+            max_result_bytes: 100000000
+            result_overflow_mode: break
+            max_execution_time: 600
+            min_execution_speed: 1000000
+            timeout_before_checking_execution_speed: 15
+            max_columns_to_read: 25
+            max_temporary_columns: 100
+            max_temporary_non_const_columns: 50
+            max_subquery_depth: 2
+            max_pipeline_depth: 25
+            max_ast_depth: 50
+            max_ast_elements: 100
+            max_sessions_for_user: 4
+            readonly: 1
+        users:
+          ## Whole-table reader. Other users' row policies do not narrow it —
+          ## they are created with apply_to_all=0 and bind only the users they
+          ## name (SELECT name, apply_to_all FROM system.row_policies).
+          reporter:
+            ## Read from the container env below, so it reaches neither the CR
+            ## nor preprocessed_configs/users.xml.
+            password:
+              "@from_env": CH_REPORTER_PASSWORD
+              "@hide_in_preprocessed": true
+            profile: readonly_user
+            networks:
+              ip: "::/0"
+            grants:
+              query:
+                - GRANT SELECT ON otel.otel_traces
+                - GRANT SELECT ON otel.otel_logs
+                ## Column-level works too, and makes SELECT * fail:
+                # - GRANT SELECT(Timestamp, TraceId, ServiceName, SpanName, Duration) ON otel.otel_traces
 
-    ## Read-only users restricted to their own Kubernetes namespaces by a
-    ## ClickHouse row policy. Requires the telemetry to carry the namespace as a
-    ## resource attribute — see charts/cluster/values.yaml for the app-side
-    ## OTEL_RESOURCE_ATTRIBUTES snippet and the full option list.
-    tenants:
-      namespaceAttribute: k8s.namespace.name
-      ## Empty derives the readable tables from cluster.rotel.telemetry and each
-      ## signal's table prefix, so a disabled signal never gets a grant on a
-      ## table that was never created. Override with an explicit list if needed.
-      tables: []
-      users: []
-      # users:
-      #   - name: team_a
-      #     namespaces: [team-a]
-      #     existingSecret: ""
+          ## Namespace-scoped reader. Same grants as reporter, narrowed by a
+          ## filter per table. A granted table with no filter entry returns
+          ## *every* row, so the two lists have to be kept in step by hand —
+          ## that is the one mistake in this block worth re-reading for.
+          ##
+          ## Needs the namespace on the telemetry itself; rotel does not enrich
+          ## spans, so instrumented workloads publish it:
+          ##   env:
+          ##     - name: POD_NAMESPACE
+          ##       valueFrom: {fieldRef: {fieldPath: metadata.namespace}}
+          ##     - name: OTEL_RESOURCE_ATTRIBUTES
+          ##       value: k8s.namespace.name=$(POD_NAMESPACE)
+          ## Rows missing the attribute match no filter and stay invisible.
+          ##
+          ## otel_traces_trace_id_ts is deliberately never granted: it holds
+          ## only trace ids and timestamps, so there is nothing to filter on.
+          team_a:
+            password:
+              "@from_env": CH_TEAM_A_PASSWORD
+              "@hide_in_preprocessed": true
+            profile: readonly_user
+            networks:
+              ip: "::/0"
+            databases:
+              otel:
+                otel_traces:
+                  filter: "ResourceAttributes['k8s.namespace.name'] IN ('team-a', 'team-a-staging')"
+                otel_logs:
+                  filter: "ResourceAttributes['k8s.namespace.name'] IN ('team-a', 'team-a-staging')"
+            grants:
+              query:
+                - GRANT SELECT ON otel.otel_traces
+                - GRANT SELECT ON otel.otel_logs
+
+    ## Env for the ClickHouse containers, one entry per user password above.
+    ## The chart generates no Secret for these users — create them first, or
+    ## every ClickHouse pod stops at CreateContainerConfigError rather than
+    ## just that user being disabled:
+    ##   kubectl -n clickhouse create secret generic reporter-ch-password \
+    ##     --from-literal=password='CHANGE_ME'
+    ## Rotating a password needs a pod restart: env is fixed at container start.
+    containerTemplate:
+      env:
+        - name: CH_REPORTER_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: reporter-ch-password
+              key: password
+        - name: CH_TEAM_A_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: team-a-ch-password
+              key: password
 
     ## Note: port 9363 is reserved by the operator for Prometheus metrics —
     ## do not add it here (validation webhook rejects it).
