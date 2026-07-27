@@ -57,12 +57,17 @@ keeper:
     tag: "26.7.1.1315"
     pullPolicy: IfNotPresent
 
+  ## No annotations key here: the CRD's dataVolumeClaimSpec is a bare
+  ## PersistentVolumeClaimSpec with no metadata, and the operator builds the
+  ## claim itself, so there is nowhere for them to land. Annotations that must
+  ## reach the claims go on keeper.annotations — the operator stamps spec
+  ## annotations onto the StatefulSet's volumeClaimTemplates, which Kubernetes
+  ## then treats as immutable.
   persistence:
     storageClassName: ""
     accessModes:
       - ReadWriteOnce
     size: 20Gi
-    annotations: {}
 
   ## Small-business production resources (coordination is light vs server)
   resources:

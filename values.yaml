@@ -192,9 +192,12 @@ cluster:
         memory: 2Gi
 
     ## Same as clickhouse.labels / clickhouse.annotations below, for the
-    ## KeeperCluster's own resources.
+    ## KeeperCluster's own resources. This is the only metadata hook — the CRD's
+    ## podTemplate has no labels or annotations field.
     labels: {}
     annotations: {}
+    # annotations:
+    #   karpenter.sh/do-not-disrupt: "true"   # keep the autoscaler off a quorum member
 
     podTemplate:
       ## topologyZoneKey / nodeHostnameKey are left at the subchart defaults,
@@ -219,10 +222,6 @@ cluster:
       #     value: clickhouse
       #     effect: NoSchedule
       affinity: {}
-      labels: {}
-      annotations: {}
-      # annotations:
-      #   karpenter.sh/do-not-disrupt: "true"   # keep the autoscaler off a quorum member
 
   # ---- ClickHouse servers ---------------------------------------------------
   clickhouse:

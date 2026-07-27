@@ -36,9 +36,6 @@ spec:
     resources:
       requests:
         storage: {{ .Values.keeper.persistence.size | quote }}
-    {{- with .Values.keeper.persistence.annotations }}
-    # PVC annotations are applied via pod/volume templates when supported
-    {{- end }}
   containerTemplate:
     image:
       repository: {{ include "cluster.imageRepository" .Values.keeper.image | quote }}
