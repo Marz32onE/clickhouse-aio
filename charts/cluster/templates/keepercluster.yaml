@@ -1,4 +1,5 @@
 {{- if .Values.keeper.enabled }}
+{{- include "cluster.rejectPodTemplateMetadata" (dict "root" $ "component" "keeper") }}
 apiVersion: clickhouse.com/v1alpha1
 kind: KeeperCluster
 metadata:
@@ -11,6 +12,20 @@ metadata:
     {{- . | nindent 4 }}
   {{- end }}
 spec:
+  {{- /*
+  See the note on the ClickHouseCluster: spec.labels / spec.annotations are the
+  operator's only metadata hook, and podTemplate has no equivalent. Annotations
+  additionally reach the StatefulSet's volumeClaimTemplates, which Kubernetes
+  treats as immutable — see the values comment before changing them in place.
+  */}}
+  {{- with include "cluster.operatorResourceLabels" (dict "root" $ "extra" .Values.keeper.labels) }}
+  labels:
+    {{- . | nindent 4 }}
+  {{- end }}
+  {{- with include "cluster.stringMap" .Values.keeper.annotations }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
   replicas: {{ .Values.keeper.replicas }}
   dataVolumeClaimSpec:
     {{- with .Values.keeper.persistence.storageClassName }}
@@ -37,14 +52,6 @@ spec:
     {{- end }}
     {{- with .Values.keeper.podTemplate.nodeHostnameKey }}
     nodeHostnameKey: {{ . | quote }}
-    {{- end }}
-    {{- with .Values.keeper.podTemplate.labels }}
-    labels:
-      {{- toYaml . | nindent 6 }}
-    {{- end }}
-    {{- with .Values.keeper.podTemplate.annotations }}
-    annotations:
-      {{- toYaml . | nindent 6 }}
     {{- end }}
     {{- with .Values.keeper.podTemplate.nodeSelector }}
     nodeSelector:

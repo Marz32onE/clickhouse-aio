@@ -1,5 +1,5 @@
 # =============================================================================
-# clickhouse-aio — production defaults (small-business size)
+# clickhouse — production defaults (small-business size)
 # =============================================================================
 # Topology (default):
 #   - Official ClickHouse Operator (cluster-scoped)
@@ -160,9 +160,13 @@ cluster:
   fullnameOverride: ""
   # fullnameOverride: analytics
 
+  ## Applied to the chart's own resources and, via each CR's spec.labels, to the
+  ## ones the operator creates from them (StatefulSets, Pods, headless Services,
+  ## ConfigMaps, PDBs). They land in the Pod template, so a change here rolls the
+  ## StatefulSets. Per-component additions: keeper.labels / clickhouse.labels.
   commonLabels:
     environment: production
-    app.kubernetes.io/part-of: clickhouse-aio
+    app.kubernetes.io/part-of: clickhouse
 
   # ---- ClickHouse Keeper ----------------------------------------------------
   keeper:
@@ -186,6 +190,12 @@ cluster:
       limits:
         cpu: "1"
         memory: 2Gi
+
+    ## Same as clickhouse.labels / clickhouse.annotations below, for the
+    ## KeeperCluster's own resources.
+    labels: {}
+    annotations: {}
+
     podTemplate:
       ## topologyZoneKey / nodeHostnameKey are left at the subchart defaults,
       ## which are the values the operator's API reference recommends: spread
@@ -253,6 +263,15 @@ cluster:
       limits:
         cpu: "4"
         memory: 16Gi
+
+    ## Labels/annotations for every resource the operator creates from this CR
+    ## (StatefulSets, Pods, headless Service, ConfigMaps, Secrets, PDBs). They
+    ## become spec.labels / spec.annotations — podTemplate has no such fields,
+    ## and the API server prunes unknown ones silently, so the chart rejects
+    ## that spelling. Changing either rolls the StatefulSets.
+    labels: {}
+    annotations: {}
+
     podTemplate:
       ## Placement keys left at the subchart defaults — see keeper above.
       nodeSelector: {}
@@ -265,8 +284,6 @@ cluster:
       #     value: clickhouse
       #     effect: NoSchedule
       affinity: {}
-      labels: {}
-      annotations: {}
 
     ## Version-detection Job the operator runs before each (re)deploy. The CRD
     ## exposes only nodeSelector for it — no tolerations, so it cannot reach a
@@ -434,6 +451,23 @@ cluster:
     ## Note: port 9363 is reserved by the operator for Prometheus metrics —
     ## do not add it here (validation webhook rejects it).
     additionalPorts: []
+
+    ## Client-facing ClusterIP Service — where Grafana and other query clients
+    ## connect. The operator only creates a headless Service, which has no VIP
+    ## and sets publishNotReadyAddresses: true, so clients resolve it directly
+    ## to Pod IPs including Pods that are not ready. This puts kube-proxy in
+    ## front of the same Pods and serves ready endpoints only.
+    ##
+    ## In-cluster only — external Grafana needs an Ingress or LoadBalancer.
+    ## Valid only while shards == 1 (see the sharding note in the README).
+    service:
+      enabled: true
+      ## Defaults to <clickhouse name>-clickhouse-client
+      name: ""
+      annotations: {}
+      ## ClientIP pins a client to one replica, so a dashboard stops flipping
+      ## between replicas at different points in replication.
+      sessionAffinity: ""
 
   # ---- Rotel OTLP collector (traces/logs → ClickHouse) ----------------------
   rotel:

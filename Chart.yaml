@@ -1,5 +1,5 @@
 apiVersion: v2
-name: clickhouse-aio
+name: clickhouse
 description: >
   Production-oriented all-in-one Helm chart for ClickHouse on Kubernetes.
   Bundles the official ClickHouse Operator and a local cluster subchart that
@@ -16,7 +16,7 @@ keywords:
   - analytics
   - olap
 maintainers:
-  - name: clickhouse-aio
+  - name: clickhouse
 sources:
   - https://github.com/ClickHouse/clickhouse-operator
   - https://clickhouse.com/docs/clickhouse-operator/overview

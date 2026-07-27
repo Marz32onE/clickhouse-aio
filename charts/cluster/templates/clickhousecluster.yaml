@@ -1,4 +1,5 @@
 {{- if .Values.clickhouse.enabled }}
+{{- include "cluster.rejectPodTemplateMetadata" (dict "root" $ "component" "clickhouse") }}
 {{- $keeperName := .Values.clickhouse.keeperClusterRef.name | default (include "cluster.keeperName" .) }}
 {{- if and .Values.keeper.enabled (not .Values.clickhouse.keeperClusterRef.name) }}
 {{- $keeperName = include "cluster.keeperName" . }}
@@ -15,6 +16,20 @@ metadata:
     {{- . | nindent 4 }}
   {{- end }}
 spec:
+  {{- /*
+  spec.labels / spec.annotations are the operator's only metadata hook: it
+  merges them into the StatefulSets, Pods, headless Service, ConfigMaps, Secrets
+  and PodDisruptionBudgets it creates. Operator-owned keys are merged last and
+  win, so neither can shadow app/clickhouse.com/* labels.
+  */}}
+  {{- with include "cluster.operatorResourceLabels" (dict "root" $ "extra" .Values.clickhouse.labels) }}
+  labels:
+    {{- . | nindent 4 }}
+  {{- end }}
+  {{- with include "cluster.stringMap" .Values.clickhouse.annotations }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
   replicas: {{ .Values.clickhouse.replicas }}
   shards: {{ .Values.clickhouse.shards }}
   keeperClusterRef:
@@ -49,14 +64,6 @@ spec:
     {{- end }}
     {{- with .Values.clickhouse.podTemplate.nodeHostnameKey }}
     nodeHostnameKey: {{ . | quote }}
-    {{- end }}
-    {{- with .Values.clickhouse.podTemplate.labels }}
-    labels:
-      {{- toYaml . | nindent 6 }}
-    {{- end }}
-    {{- with .Values.clickhouse.podTemplate.annotations }}
-    annotations:
-      {{- toYaml . | nindent 6 }}
     {{- end }}
     {{- with .Values.clickhouse.podTemplate.nodeSelector }}
     nodeSelector:

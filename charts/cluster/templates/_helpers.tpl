@@ -102,6 +102,76 @@ TLS certificate secret names
 {{- end }}
 
 {{/*
+Labels for every resource the operator creates for a CR — StatefulSets, Pods,
+the headless Service, ConfigMaps, Secrets, PodDisruptionBudgets. Emitted as the
+CR's spec.labels, which is the only hook the operator offers for this: the CRD's
+podTemplate has no labels field, and a structural schema prunes unknown fields
+without an error, so labels set there vanish between kubectl and etcd.
+
+commonLabels flows in here as well, so a label set once at the chart level
+reaches the operator-managed resources and not only the chart-managed ones.
+Component labels win on a key collision.
+
+Safe to change on a live cluster: the operator merges spec.labels into the
+StatefulSet's pod template but not into spec.selector (which the API server
+would refuse to update). The pod-template change does roll the StatefulSets.
+
+Call with (dict "root" $ "extra" .Values.clickhouse.labels).
+*/}}
+{{- define "cluster.operatorResourceLabels" -}}
+{{- include "cluster.stringMap" (merge (dict) (.extra | default dict) (.root.Values.commonLabels | default dict)) -}}
+{{- end }}
+
+{{/*
+Render a map with every value coerced to a string. Both CRDs type spec.labels
+and spec.annotations as map[string]string, so a value that YAML reads as a bool
+or a number — `do-not-disrupt: true`, `revision: 3` — fails validation on apply.
+Quoting here means values.yaml does not have to remember to.
+*/}}
+{{- define "cluster.stringMap" -}}
+{{- $out := dict -}}
+{{- range $k, $v := . -}}
+{{- $_ := set $out $k (toString $v) -}}
+{{- end -}}
+{{- with $out }}{{ toYaml . }}{{ end }}
+{{- end }}
+
+{{/*
+Guard for the two podTemplate fields the CRDs do not define. Both CRD schemas
+list podTemplate as affinity/imagePullSecrets/initContainers/nodeHostnameKey/
+nodeSelector/priorityClassName/runtimeClassName/schedulerName/securityContext/
+serviceAccountName/terminationGracePeriodSeconds/tolerations/
+topologySpreadConstraints/topologyZoneKey/volumes — no labels, no annotations,
+and no x-kubernetes-preserve-unknown-fields. Failing here beats letting the API
+server drop them silently.
+
+Call with (dict "root" $ "component" "clickhouse").
+*/}}
+{{- define "cluster.rejectPodTemplateMetadata" -}}
+{{- $c := index .root.Values .component -}}
+{{- $pt := $c.podTemplate | default dict -}}
+{{- range $field := list "labels" "annotations" -}}
+{{- if index $pt $field -}}
+{{- fail (printf "%s.podTemplate.%s is not a field the CRD accepts — the API server prunes it silently, so it would never reach the Pods. Use %s.%s instead: it sets spec.%s on the CR, which the operator merges into every resource it creates for the cluster." $.component $field $.component $field $field) -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Client-facing ClickHouse Service name. Deliberately not <name>-clickhouse: the
+operator already uses that exact string for the cluster Secret
+(SpecificResourceName("")), and two different kinds sharing a name reads as a
+mistake even though Kubernetes allows it.
+*/}}
+{{- define "cluster.clickhouseServiceName" -}}
+{{- if .Values.clickhouse.service.name }}
+{{- .Values.clickhouse.service.name | trunc 63 | trimSuffix "-" }}
+{{- else }}
+{{- printf "%s-clickhouse-client" (include "cluster.clickhouseName" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+{{- end }}
+
+{{/*
 Rotel collector resource name
 */}}
 {{- define "cluster.rotelName" -}}

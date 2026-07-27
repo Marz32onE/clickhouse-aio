@@ -1,4 +1,4 @@
-# clickhouse-aio
+# clickhouse
 
 Production-oriented **all-in-one Helm chart** for ClickHouse on Kubernetes.
 
@@ -13,7 +13,7 @@ Default profile targets a **small-business production** footprint: HA without ov
 
 ```
                     ┌─────────────────────────────────────┐
-                    │         clickhouse-aio (umbrella)   │
+                    │         clickhouse (umbrella)       │
                     │  values.yaml  (small-biz production)│
                     └──────────────┬──────────────────────┘
                                    │
@@ -420,21 +420,41 @@ both lags on merges and still serves its share of queries.
 
 ### Pod scheduling and naming
 
-Every pod the chart is responsible for takes `nodeSelector`, `tolerations`,
-`affinity`, labels and annotations. `values.yaml` carries a commented example
-for each.
+Every pod the chart is responsible for takes `nodeSelector`, `tolerations` and
+`affinity`. `values.yaml` carries a commented example for each.
 
-| Pod | Values key |
-|-----|------------|
-| Keeper | `cluster.keeper.podTemplate.*` |
-| ClickHouse server | `cluster.clickhouse.podTemplate.*` |
-| Version-probe Job | `cluster.clickhouse.versionProbe.*` — **`nodeSelector` only**, the CRD has no tolerations or affinity field |
-| Rotel collector | `cluster.rotel.{nodeSelector,tolerations,affinity,podLabels,podAnnotations}` |
-| Schema + TTL Jobs | `cluster.rotel.jobs.*` |
-| Operator manager | `operator.manager.{nodeSelector,tolerations,affinity}` |
+| Pod | Scheduling | Labels / annotations |
+|-----|------------|----------------------|
+| Keeper | `cluster.keeper.podTemplate.*` | `cluster.keeper.{labels,annotations}` |
+| ClickHouse server | `cluster.clickhouse.podTemplate.*` | `cluster.clickhouse.{labels,annotations}` |
+| Version-probe Job | `cluster.clickhouse.versionProbe.nodeSelector` — **`nodeSelector` only**, the CRD has no tolerations or affinity field | `cluster.clickhouse.versionProbe.{labels,annotations}` |
+| Rotel collector | `cluster.rotel.{nodeSelector,tolerations,affinity}` | `cluster.rotel.{podLabels,podAnnotations}` |
+| Schema + TTL Jobs | `cluster.rotel.jobs.{nodeSelector,tolerations,affinity}` | `cluster.rotel.jobs.{podLabels,podAnnotations}` |
+| Operator manager | `operator.manager.{nodeSelector,tolerations,affinity}` | — |
 
-Two traps worth naming. A `nodeSelector` alone will not place a pod on a
-**tainted** node — pair it with tolerations. And the schema/TTL Jobs are helm
+The split in that table is not cosmetic. Keeper and ClickHouse pods are created
+by the operator, not by the chart, and **neither CRD's `podTemplate` has a
+`labels` or `annotations` field**. A structural CRD schema prunes unknown fields
+without raising an error, so metadata set there is dropped between `kubectl` and
+etcd — visible nowhere, and easy to mistake for the operator ignoring it. The
+operator's actual hook is `spec.labels` / `spec.annotations` on the CR, which it
+merges into everything it creates for that cluster: StatefulSets, Pods, the
+headless Service, ConfigMaps, Secrets, PodDisruptionBudgets. That is what
+`cluster.{keeper,clickhouse}.{labels,annotations}` set. Setting them under
+`podTemplate` fails the render with a pointer to the right key.
+
+`cluster.commonLabels` feeds the same `spec.labels`, so a label set once at the
+chart level now reaches the operator-managed resources too, not just the
+chart-managed ones. Per-component `labels` are merged on top and win on a key
+collision; operator-owned labels (`app`, `clickhouse.com/*`) win over both.
+
+Two cautions. Both fields land in the StatefulSet pod template, so changing them
+rolls the pods — they do **not** enter `spec.selector`, so a live cluster does
+accept the change. And the operator also stamps annotations onto the
+StatefulSet's `volumeClaimTemplates`, which Kubernetes treats as immutable.
+
+Two scheduling traps worth naming. A `nodeSelector` alone will not place a pod on
+a **tainted** node — pair it with tolerations. And the schema/TTL Jobs are helm
 hooks, so one that can never schedule blocks the whole `helm upgrade` until it
 times out; give them the same tolerations as the database nodes they talk to.
 
@@ -556,7 +576,7 @@ it to be healthy, then syncs the CRs. The rotel DDL Job carries Helm
 apiVersion: argoproj.io/v1beta1
 kind: Application
 metadata:
-  name: clickhouse-aio
+  name: clickhouse
   namespace: argocd
 spec:
   project: default
@@ -755,10 +775,51 @@ Notes:
   ClickHouse ≥ 26.x images; the chart bumps it via
   `cluster.clickhouse.versionProbe.resources`.
 
+### Query endpoint
+
+Query clients — Grafana, ClickStack, `clickhouse-client`, anything running a
+`SELECT` — connect to a ClusterIP Service the chart creates:
+
+```
+HTTP    <cluster-name>-clickhouse-client.<namespace>.svc:8123
+Native  <cluster-name>-clickhouse-client.<namespace>.svc:9000
+```
+
+With `cluster.tls.enabled`, those become `8443` / `9440`, and the plaintext pair
+disappears once `tls.required` is also set — the same rule the operator applies
+to the server's own listeners.
+
+This exists because the operator's `<cluster-name>-clickhouse-headless` Service
+is not a client endpoint. It is headless, so there is no VIP and a client
+resolves it straight to Pod IPs; a connection pool then holds those IPs and
+keeps using a Pod after it goes unhealthy. And the operator sets
+`publishNotReadyAddresses: true` on it, so its DNS deliberately hands out Pods
+that are still starting. The ClusterIP Service selects the same Pods
+(`app=<cluster-name>-clickhouse`, `clickhouse.com/role=clickhouse-server`) with
+kube-proxy in front, so only ready endpoints receive traffic and liveness is
+re-checked per connection rather than at DNS-resolution time.
+
+Two things it does not do:
+
+- **Reach outside the cluster.** ClusterIP is in-cluster only. Grafana Cloud or
+  a Grafana in another cluster needs an Ingress or a LoadBalancer; this chart
+  creates neither.
+- **Survive sharding.** With `shards > 1` it load-balances across shards, and
+  each query returns whichever shard answered. Same trap as the rotel write
+  path — see [Sharding is not a values-only change](#sharding-is-not-a-values-only-change).
+
+Round-robin across replicas is correct at `shards: 1` (every replica holds the
+full dataset) but not deterministic: replicas sit at different points in
+replication, so a dashboard comparing values across refreshes can watch a
+counter go backwards. `cluster.clickhouse.service.sessionAffinity: ClientIP`
+pins each client to one replica. Set `cluster.clickhouse.service.enabled: false`
+to drop the Service and go back to the headless name.
+
 ### Visualization
 
 ClickHouse **26.2+** embeds the ClickStack (HyperDX) UI in the server binary at
-`http://<clickhouse>:8123/clickstack` — auto-detects the `otel_*` tables, gives
+`http://<cluster-name>-clickhouse-client.<namespace>.svc:8123/clickstack` —
+auto-detects the `otel_*` tables, gives
 search, trace waterfalls, chart explorer, and service maps with zero extra
 components. No persistence for dashboards/alerts (browser-local state) — good
 for dev/small teams; for full ClickStack (alerts, saved dashboards, auth) run

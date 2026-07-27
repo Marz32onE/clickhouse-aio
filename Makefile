@@ -1,4 +1,4 @@
-CHART_NAME ?= clickhouse-aio
+CHART_NAME ?= clickhouse
 RELEASE ?= ch-aio
 NAMESPACE ?= clickhouse
 VALUES ?= values.yaml

@@ -1,5 +1,5 @@
 ## Default values for the cluster subchart.
-## Parent chart (clickhouse-aio) overrides these for production small-business sizing.
+## Parent chart (clickhouse) overrides these for production small-business sizing.
 
 ## Replaces the chart name inside the generated fullname, and is also the value
 ## of app.kubernetes.io/name. That label is part of the selector labels, and a
@@ -16,6 +16,14 @@ nameOverride: ""
 ## one of those, which the operator sees as a new cluster.
 fullnameOverride: ""
 
+## Labels added to every resource in the release — the chart's own (the CRs, the
+## rotel Deployment/Service/Jobs, the Secret, the PVCs) and, through each CR's
+## spec.labels, the ones the operator creates from them (StatefulSets, Pods,
+## headless Services, ConfigMaps, PodDisruptionBudgets).
+##
+## keeper.labels / clickhouse.labels add to this per component and win on a key
+## collision. Reaching the operator's resources means these end up in the Pod
+## template, so changing them rolls the StatefulSets.
 commonLabels: {}
 
 ## ArgoCD integration: annotate cluster resources with a sync-wave so the
@@ -65,6 +73,29 @@ keeper:
       cpu: "1"
       memory: 2Gi
 
+  ## Labels and annotations added to everything the operator creates for this
+  ## KeeperCluster: the StatefulSets, their Pods, the headless Service, the
+  ## ConfigMaps, the PodDisruptionBudgets. They become spec.labels /
+  ## spec.annotations on the CR, which is the only metadata hook the operator
+  ## offers — podTemplate has no labels or annotations field, and the API server
+  ## drops unknown fields without an error, so setting them there is a no-op.
+  ## The chart rejects that spelling rather than letting it disappear.
+  ##
+  ## commonLabels (top of this file) is merged in as well; these win on a key
+  ## collision, and operator-owned labels win over both.
+  ##
+  ## Changing either rolls the StatefulSets — both land in the Pod template.
+  ## Neither enters spec.selector, so a live cluster accepts the change.
+  ## One caution on annotations: the operator also stamps them onto the
+  ## StatefulSet's volumeClaimTemplates, which Kubernetes treats as immutable.
+  labels: {}
+  # labels:
+  #   tier: storage
+  annotations: {}
+  # annotations:
+  #   karpenter.sh/do-not-disrupt: "true"     # keep the autoscaler off a quorum member
+  #   prometheus.io/scrape: "false"
+
   podTemplate:
     ## Placement keys, both at the values the operator's API reference
     ## recommends. They drive two different operator-generated rules:
@@ -84,13 +115,10 @@ keeper:
     ## install — see "Dev / local cluster" in the README.
     topologyZoneKey: topology.kubernetes.io/zone
     nodeHostnameKey: kubernetes.io/hostname
-    labels: {}
-    # labels:
-    #   tier: storage
-    annotations: {}
-    # annotations:
-    #   karpenter.sh/do-not-disrupt: "true"     # keep the autoscaler off a quorum member
-    #   prometheus.io/scrape: "false"
+    ## No labels/annotations here — the CRD's podTemplate has neither field, and
+    ## the API server prunes unknown fields silently. Use keeper.labels /
+    ## keeper.annotations above; the chart fails the render if they appear here.
+    ##
     ## Pin the pods to a node pool. Keeper is latency-sensitive and small, so
     ## it usually wants the same nodes as ClickHouse rather than a spot pool.
     nodeSelector: {}
@@ -217,14 +245,24 @@ clickhouse:
       cpu: "4"
       memory: 16Gi
 
+  ## Labels and annotations added to everything the operator creates for this
+  ## ClickHouseCluster: StatefulSets, Pods, the headless Service, ConfigMaps,
+  ## Secrets, PodDisruptionBudgets. See the keeper.labels comment above for why
+  ## these live here and not under podTemplate, and for the two cautions
+  ## (rolling restart, immutable volumeClaimTemplates).
+  labels: {}
+  # labels:
+  #   tier: database
+  annotations: {}
+  # annotations:
+  #   karpenter.sh/do-not-disrupt: "true"
+
   podTemplate:
     ## See the keeper.podTemplate comments above for what each field does.
+    ## labels/annotations are not among them — use clickhouse.labels /
+    ## clickhouse.annotations above.
     topologyZoneKey: topology.kubernetes.io/zone
     nodeHostnameKey: kubernetes.io/hostname
-    labels: {}
-    annotations: {}
-    # annotations:
-    #   karpenter.sh/do-not-disrupt: "true"
     nodeSelector: {}
     # nodeSelector:
     #   node-role.kubernetes.io/database: "true"
@@ -362,6 +400,37 @@ clickhouse:
   containerTemplate:
     env: []
     volumeMounts: []
+
+  ## Client-facing ClusterIP Service — the endpoint Grafana, BI tools and
+  ## anything else running a SELECT should point at.
+  ##
+  ## The operator itself only creates <name>-clickhouse-headless, which is not a
+  ## substitute for two reasons. It has no VIP, so a client resolves it straight
+  ## to Pod IPs and a pooled connection keeps talking to a Pod that has since
+  ## gone unhealthy. And the operator sets publishNotReadyAddresses: true on it,
+  ## so its DNS deliberately includes Pods that are not ready yet. A ClusterIP
+  ## Service over the same Pods puts kube-proxy in front of both problems:
+  ## ready endpoints only, re-evaluated per connection.
+  ##
+  ## In-cluster reachability only. Grafana Cloud or anything outside the cluster
+  ## needs an Ingress or LoadBalancer, neither of which this chart creates.
+  ##
+  ## Valid only while shards == 1. With more shards this load-balances across
+  ## shards and each query returns whichever shard answered — see the sharding
+  ## note in the README before raising clickhouse.shards.
+  service:
+    enabled: true
+    ## Defaults to <clickhouse name>-clickhouse-client
+    name: ""
+    annotations: {}
+    ## Ports follow tls.*: plaintext 8123/9000 until TLS is both enabled and
+    ## required, secure 8443/9440 whenever TLS is enabled. Same rule the
+    ## operator applies to the server's listeners.
+    ##
+    ## ClientIP pins each client to one replica. Worth setting for dashboards
+    ## that compare values across refreshes: replicas sit at different points in
+    ## replication, so round-robin can make a counter appear to go backwards.
+    sessionAffinity: ""
 
 # ---------------------------------------------------------------------------
 # Rotel — lightweight Rust OTLP collector writing traces into ClickHouse

@@ -1,5 +1,5 @@
 ========================================================================
- clickhouse-aio  (official ClickHouse Operator + Keeper + Cluster)
+ clickhouse  (official ClickHouse Operator + Keeper + Cluster)
 ========================================================================
 
 Release:   {{ .Release.Name }}
