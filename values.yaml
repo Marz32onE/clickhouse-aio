@@ -46,18 +46,23 @@ operator:
     pdbManagement:
       enabled: true
 
-  ## Pinned explicitly rather than falling through to the subchart's
-  ## appVersion default, so the operator version is visible here and an upgrade
-  ## of the vendored chart cannot move it on its own.
-  image:
-    registry: ""
-    repository: ghcr.io/clickhouse/clickhouse-operator
-    tag: "v0.0.7"
-    pullPolicy: IfNotPresent
-
   manager:
     enabled: true
     replicas: 1
+
+    ## Pinned explicitly rather than falling through to the subchart's
+    ## appVersion default, so the operator version is visible here and an
+    ## upgrade of the vendored chart cannot move it on its own.
+    ##
+    ## Note the nesting: the subchart reads manager.image, not a top-level
+    ## operator.image. A block one level up renders nothing and no error —
+    ## the manager silently keeps running the appVersion tag.
+    image:
+      registry: ""
+      repository: ghcr.io/clickhouse/clickhouse-operator
+      tag: "v0.0.7"
+      pullPolicy: IfNotPresent
+
     resources:
       requests:
         cpu: 50m
@@ -373,6 +378,17 @@ cluster:
             max_ast_elements: 100
             max_sessions_for_user: 4
             readonly: 1
+        ## Every user here is a chart default, which matters when this chart is
+        ## consumed as a subchart: Helm merges maps key by key, so a parent
+        ## values file that omits one of these does not remove it — omitting and
+        ## keeping are the same input. The only way to drop a default user from
+        ## a parent chart is to name it explicitly:
+        ##   users:
+        ##     reporter: null
+        ## Its containerTemplate.env entry below is a list item, and lists are
+        ## replaced wholesale rather than merged, so that has to be re-stated in
+        ## full at the same time — a leftover env entry pointing at a Secret
+        ## that does not exist stops *every* ClickHouse pod, not just that user.
         users:
           ## Whole-table reader. Other users' row policies do not narrow it —
           ## they are created with apply_to_all=0 and bind only the users they
@@ -393,10 +409,15 @@ cluster:
                 ## Column-level works too, and makes SELECT * fail:
                 # - GRANT SELECT(Timestamp, TraceId, ServiceName, SpanName, Duration) ON otel.otel_traces
 
-          ## Namespace-scoped reader. Same grants as reporter, narrowed by a
-          ## filter per table. A granted table with no filter entry returns
-          ## *every* row, so the two lists have to be kept in step by hand —
-          ## that is the one mistake in this block worth re-reading for.
+          ## Namespace-scoped reader, left commented: it names a team that only
+          ## exists here as an example, and shipping it enabled would push a
+          ## `team-a-ch-password` Secret requirement onto every consumer of this
+          ## chart. Uncomment and rename to add one.
+          ##
+          ## Same grants as reporter, narrowed by a filter per table. A granted
+          ## table with no filter entry returns *every* row, so the two lists
+          ## have to be kept in step by hand — that is the one mistake in this
+          ## block worth re-reading for.
           ##
           ## Needs the namespace on the telemetry itself; rotel does not enrich
           ## spans, so instrumented workloads publish it:
@@ -409,23 +430,24 @@ cluster:
           ##
           ## otel_traces_trace_id_ts is deliberately never granted: it holds
           ## only trace ids and timestamps, so there is nothing to filter on.
-          team_a:
-            password:
-              "@from_env": CH_TEAM_A_PASSWORD
-              "@hide_in_preprocessed": true
-            profile: readonly_user
-            networks:
-              ip: "::/0"
-            databases:
-              otel:
-                otel_traces:
-                  filter: "ResourceAttributes['k8s.namespace.name'] IN ('team-a', 'team-a-staging')"
-                otel_logs:
-                  filter: "ResourceAttributes['k8s.namespace.name'] IN ('team-a', 'team-a-staging')"
-            grants:
-              query:
-                - GRANT SELECT ON otel.otel_traces
-                - GRANT SELECT ON otel.otel_logs
+          #
+          # team_a:
+          #   password:
+          #     "@from_env": CH_TEAM_A_PASSWORD
+          #     "@hide_in_preprocessed": true
+          #   profile: readonly_user
+          #   networks:
+          #     ip: "::/0"
+          #   databases:
+          #     otel:
+          #       otel_traces:
+          #         filter: "ResourceAttributes['k8s.namespace.name'] IN ('team-a', 'team-a-staging')"
+          #       otel_logs:
+          #         filter: "ResourceAttributes['k8s.namespace.name'] IN ('team-a', 'team-a-staging')"
+          #   grants:
+          #     query:
+          #       - GRANT SELECT ON otel.otel_traces
+          #       - GRANT SELECT ON otel.otel_logs
 
     ## Env for the ClickHouse containers, one entry per user password above.
     ## The chart generates no Secret for these users — create them first, or
@@ -441,11 +463,12 @@ cluster:
             secretKeyRef:
               name: reporter-ch-password
               key: password
-        - name: CH_TEAM_A_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: team-a-ch-password
-              key: password
+        ## Paired with the commented team_a user above — uncomment both together.
+        # - name: CH_TEAM_A_PASSWORD
+        #   valueFrom:
+        #     secretKeyRef:
+        #       name: team-a-ch-password
+        #       key: password
 
     ## Note: port 9363 is reserved by the operator for Prometheus metrics —
     ## do not add it here (validation webhook rejects it).
