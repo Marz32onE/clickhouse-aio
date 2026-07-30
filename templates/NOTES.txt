@@ -1,5 +1,5 @@
 ========================================================================
- clickhouse  (official ClickHouse Operator + Keeper + Cluster)
+ clickhouse  (Altinity Operator + Keeper + Cluster)
 ========================================================================
 
 Release:   {{ .Release.Name }}
@@ -8,54 +8,52 @@ Namespace: {{ .Release.Namespace }}
 {{- if .Values.operator.enabled }}
 
 Operator
-  The official ClickHouse Operator is installed
-  (subchart: oci://ghcr.io/clickhouse/clickhouse-operator-helm).
+  Altinity clickhouse-operator is installed
+  (subchart: altinity/altinity-clickhouse-operator).
 
-  Prerequisite: cert-manager must already be present when
-  operator.certManager.enabled=true (default).
-
-  kubectl get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/name=clickhouse-operator-helm
+  kubectl get pods -n {{ .Release.Namespace }} -l app=clickhouse-operator
 {{- end }}
 
 {{- if and .Values.cluster .Values.cluster.enabled }}
 
 Cluster
-  Keeper:     KeeperCluster   (replicas={{ .Values.cluster.keeper.replicas }})
-  ClickHouse: ClickHouseCluster (shards={{ .Values.cluster.clickhouse.shards }} × replicas={{ .Values.cluster.clickhouse.replicas }})
+  Keeper:     ClickHouseKeeperInstallation  (replicas={{ .Values.cluster.keeper.replicas }})
+  ClickHouse: ClickHouseInstallation (shards={{ .Values.cluster.clickhouse.shards }} × replicas={{ .Values.cluster.clickhouse.replicas }})
 
   Status:
-    kubectl get keeperclusters,clickhouseclusters -n {{ .Release.Namespace }}
+    kubectl get chk,chi -n {{ .Release.Namespace }}
     kubectl get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/instance={{ .Release.Name }}
 
   Default user password Secret:
-    kubectl get secret -n {{ .Release.Namespace }} -l app.kubernetes.io/component=clickhouse
+    kubectl get secret -n {{ .Release.Namespace }} {{ .Release.Name }}-cluster-default-password 2>/dev/null \
+      || kubectl get secret -n {{ .Release.Namespace }} -l app.kubernetes.io/component=clickhouse
 
-  Connect (in-cluster, native protocol):
+  Connect (in-cluster):
     kubectl exec -it -n {{ .Release.Namespace }} \
-      $(kubectl get pods -n {{ .Release.Namespace }} -l 'app.kubernetes.io/component=clickhouse' -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo '<clickhouse-pod>') \
-      -- clickhouse-client --password "$(kubectl get secret -n {{ .Release.Namespace }} -o jsonpath='{.items[0].data.password}' 2>/dev/null | head -1 | base64 -d 2>/dev/null)"
+      $(kubectl get pods -n {{ .Release.Namespace }} -l 'clickhouse.altinity.com/app=chop' -o jsonpath='{.items[0].metadata.name}') \
+      -- clickhouse-client
 
-  Port-forward HTTP UI / client:
-    kubectl port-forward -n {{ .Release.Namespace }} svc/<cluster-name>-clickhouse 8123:8123 9000:9000
+  Port-forward:
+    kubectl port-forward -n {{ .Release.Namespace }} \
+      svc/{{ .Release.Name }}-cluster-clickhouse-client 8123:8123 9000:9000
 {{- if .Values.cluster.rotel.enabled }}
 
-  Rotel OTLP collector (traces/logs → ClickHouse, db "{{ .Values.cluster.rotel.exporter.database | default "otel" }}"):
-    OTLP/gRPC: <cluster-name>-rotel.{{ .Release.Namespace }}.svc:4317
-    OTLP/HTTP: <cluster-name>-rotel.{{ .Release.Namespace }}.svc:4318
+  Rotel OTLP collector (traces/logs → ClickHouse):
+    OTLP/gRPC: {{ .Release.Name }}-cluster-rotel.{{ .Release.Namespace }}.svc:4317
+    OTLP/HTTP: {{ .Release.Name }}-cluster-rotel.{{ .Release.Namespace }}.svc:4318
 {{- end }}
 {{- end }}
 
 Sizing (this profile)
-  Workload class : small-business production
+  Workload class : small-business production (override with values-local.yaml for kind)
   Keeper         : {{ .Values.cluster.keeper.replicas }} × ({{ .Values.cluster.keeper.resources.requests.cpu }}–{{ .Values.cluster.keeper.resources.limits.cpu }} CPU, {{ .Values.cluster.keeper.resources.requests.memory }}–{{ .Values.cluster.keeper.resources.limits.memory }} RAM, {{ .Values.cluster.keeper.persistence.size }} disk)
   ClickHouse     : {{ .Values.cluster.clickhouse.replicas }} × ({{ .Values.cluster.clickhouse.resources.requests.cpu }}–{{ .Values.cluster.clickhouse.resources.limits.cpu }} CPU, {{ .Values.cluster.clickhouse.resources.requests.memory }}–{{ .Values.cluster.clickhouse.resources.limits.memory }} RAM, {{ .Values.cluster.clickhouse.persistence.size }} disk), {{ .Values.cluster.clickhouse.shards }} shard
-  Scale next     : raise clickhouse.resources, then replicas, then PVC size.
-                   Sharding needs a Distributed table first — see the README.
 
 Notes
-  • Official operator CRDs: ClickHouseCluster / KeeperCluster (clickhouse.com/v1alpha1)
+  • Altinity CRDs: ClickHouseInstallation / ClickHouseKeeperInstallation
   • Set a durable storageClassName before production traffic.
   • Do not change keeper.replicas after the first successful deploy.
+  • Quick start: https://github.com/Altinity/clickhouse-operator/blob/master/docs/quick_start.md
 
-Docs: https://clickhouse.com/docs/clickhouse-operator/overview
+Docs: https://docs.altinity.com/altinitykubernetesoperator/
 ========================================================================

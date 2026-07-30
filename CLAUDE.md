@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this repo is
 
-A single Helm umbrella chart (`clickhouse`) that deploys the **official ClickHouse Inc operator** (`ClickHouseCluster` / `KeeperCluster`, `clickhouse.com/v1alpha1`) plus a cluster built from it. There is no application code and no test suite — every change is Go-template YAML, and the only verification loop is `helm lint` / `helm template`.
+A single Helm umbrella chart (`clickhouse`) that deploys the **Altinity ClickHouse operator** (`ClickHouseInstallation` / `ClickHouseKeeperInstallation`, `clickhouse.altinity.com/v1` + `clickhouse-keeper.altinity.com/v1`) plus a cluster built from it. There is no application code and no test suite — every change is Go-template YAML, and the only verification loop is `helm lint` / `helm template` (and a local kind install).
 
-Not the Altinity operator. `CHI`/`CHK` CRDs, `clickhouse-operator` (Altinity) docs, and `chi`/`chk` short names do not apply here.
+Upstream quick start: https://github.com/Altinity/clickhouse-operator/blob/master/docs/quick_start.md
 
 ## Commands
 
@@ -28,7 +28,7 @@ To render one subchart in isolation, `helm template ... --set cluster.enabled=fa
 
 **`helm dependency update` is destructive here.** It repackages both vendored subcharts into `charts/*.tgz` beside the source directories. Helm then sees two charts of the same name and the winner is not stable, so a stale archive silently installs older templates. Always delete the archives afterwards — `make deps` does this, a bare `helm dependency update` does not.
 
-Refreshing the vendored operator chart: `rm -rf charts/clickhouse-operator-helm`, `helm pull oci://ghcr.io/clickhouse/clickhouse-operator-helm --version <new> --untar --untardir charts/`, bump `dependencies[].version` in `Chart.yaml`, then `make deps`.
+Refreshing the vendored operator chart: `rm -rf charts/altinity-clickhouse-operator`, `helm pull altinity/altinity-clickhouse-operator --version <new> --untar --untardir charts/`, bump `dependencies[].version` in `Chart.yaml`, then `make deps`.
 
 ## Layout
 
@@ -36,11 +36,11 @@ Refreshing the vendored operator chart: `rm -rf charts/clickhouse-operator-helm`
 Chart.yaml              umbrella; both deps are file:// (offline installs work from a clone)
 values.yaml             the production profile — cluster.* keys override the subchart
 templates/              only NOTES.txt + validate-rbac-scope.yaml
-charts/clickhouse-operator-helm/   VENDORED UPSTREAM — do not hand-edit, re-pull instead
-charts/cluster/         the local subchart: the CRs, Rotel, and the schema/TTL Jobs
+charts/altinity-clickhouse-operator/   VENDORED UPSTREAM — do not hand-edit, re-pull instead
+charts/cluster/         the local subchart: CHI/CHK CRs, Rotel, and the schema/TTL Jobs
 ```
 
-`charts/cluster/` is where nearly all work happens. `charts/cluster/templates/_helpers.tpl` holds the naming chain, the image-triple builder, the Rotel exporter/env generation, and most of the validation.
+`charts/cluster/` is where nearly all work happens. Templates emit Altinity `ClickHouseInstallation` / `ClickHouseKeeperInstallation`. `charts/cluster/templates/_helpers.tpl` holds the naming chain, image triples, settings flattening, user conversion, Rotel exporter/env generation, and most validation.
 
 ## Two values files, one profile
 
@@ -50,9 +50,9 @@ Not everything is mirrored: the root file's `settings.users` block ships an acti
 
 ## Architecture
 
-The operator owns the Pods. The chart writes two CRs (`KeeperCluster`, `ClickHouseCluster`) and the operator creates the StatefulSets, headless Service, ConfigMaps and PDBs from them. Anything the chart wants on an operator-created Pod has to go through a field the CRD actually has.
+The operator owns the Pods. The chart writes two CRs (`ClickHouseKeeperInstallation`, `ClickHouseInstallation`) and the operator creates the StatefulSets, Services, ConfigMaps and PDBs from them. Anything the chart wants on an operator-created Pod goes through CHI/CHK templates (podTemplates, volumeClaimTemplates, serviceTemplates).
 
-The chart directly owns: the default-user Secret, a ClusterIP client Service, per-replica PVCs, TLS Certificates, and the Rotel collector (Deployment / Service / HPA / DDL Job / TTL Job).
+The chart directly owns: the default-user Secret, TLS Certificates (optional), and the Rotel collector (Deployment / Service / HPA / DDL Job / TTL Job). The client ClusterIP Service is created by the operator from a CHI serviceTemplate.
 
 **Rotel signal wiring is generated from one list.** `rotel.telemetry.{traces,logs,metrics}` drives the DDL Job's tables, the Deployment's exporters, and which OTLP receivers stay open. Keep them derived from that single list — they cannot be allowed to drift apart.
 
@@ -62,12 +62,11 @@ Templates `fail` early rather than letting a bad render reach the cluster. Every
 
 Current guards, all worth knowing before changing defaults:
 
-- `operator.rbac.namespaced=true` requires `controller.watchNamespaces == [release namespace]` exactly. Empty means cluster-wide, which a namespaced Role cannot serve. (`templates/validate-rbac-scope.yaml`)
-- `cluster.argocdAnnotations` fails on an unknown component name. Every chart-owned resource gets a sync-wave — there is no toggle, and no per-resource literal: add the component to the `$waves` dict in `_helpers.tpl` rather than writing the annotation inline. The wave order (certs 1, keeper+PVCs 2, ClickHouse 3, rotel 4) is what orders Keeper ahead of ClickHouse; the operator itself only *logs* when Keeper is not Ready, so nothing else does.
+- `operator.rbac.namespaceScoped=true` with a foreign entry in `operator.watchNamespaces` fails. Empty `watchNamespaces` means the operator's own namespace (when not in kube-system). (`templates/validate-rbac-scope.yaml`)
+- `cluster.argocdAnnotations` fails on an unknown component name. Wave order: certs 1, keeper 2, clickhouse 3, rotel 4.
 - `rotel.exporter.databaseEngine=Replicated` requires `exporter.cluster` set and `engine=ReplicatedMergeTree`.
-- `{keeper,clickhouse}.podTemplate.{labels,annotations}` → fail with a pointer to `{keeper,clickhouse}.{labels,annotations}`. The CRD's `podTemplate` has no metadata fields and a structural schema prunes unknown ones without erroring, so setting them there would vanish between `kubectl` and etcd.
-- `persistence.perReplica` indices must be inside `replicas`/`shards`, unique, and the cluster name ≤ ~48 chars — past that the operator truncates the StatefulSet name and splices in a hash, orphaning the pre-created claim.
 - `rotel.exporter.ttl` matches `<n><s|m|h|d>`; table prefixes must be ClickHouse identifiers.
+- Nested `settings.extraConfig` is flattened to Altinity slash paths; large ints avoid scientific notation.
 
 Not enforced, but load-bearing:
 
@@ -77,9 +76,9 @@ Not enforced, but load-bearing:
 
 ## Users
 
-One mechanism: `clickhouse.settings.extraUsersConfig`, passed to the operator verbatim (users, profiles, grants, row filters). Passwords for those users come from Secrets you create — the chart generates none, and they are injected as container env read back with `@from_env` so they reach neither the CR nor `preprocessed_configs/users.xml`. A missing Secret leaves every ClickHouse pod in `CreateContainerConfigError`, not just that user disabled.
+`clickhouse.settings.extraUsersConfig` is converted to Altinity flat `configuration.users` / `profiles` keys. Passwords support plaintext, `password_sha256_hex`, `passwordSecret`, or `@from_env` resolved via `containerTemplate.env` secretKeyRef. A missing Secret for a referenced user fails CHI reconcile rather than starting without that user.
 
-The `default` user is separate: `clickhouse.defaultUser`, with a chart-generated Secret named `<clickhouseName>-default-password` (annotated `helm.sh/resource-policy: keep`, reused across upgrades via `lookup`).
+The `default` user is separate: `clickhouse.defaultUser`, with a chart-generated Secret named `<clickhouseName>-default-password` (annotated `helm.sh/resource-policy: keep`, reused across upgrades via `lookup`), referenced as `valueFrom.secretKeyRef` on the CHI.
 
 ## Images
 

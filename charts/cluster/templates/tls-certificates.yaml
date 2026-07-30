@@ -2,9 +2,17 @@
 {{- if not .Values.tls.issuerRef.name }}
 {{- fail "tls.enabled with createCertificates requires tls.issuerRef.name" }}
 {{- end }}
+{{- /*
+  TLS for the Altinity operator is more involved than the official operator's
+  settings.tls block (secure cluster + openSSL config + cert mounts). The chart
+  still mints cert-manager Certificates so secrets exist; wiring them into CHI
+  / CHK (secure: yes, openSSL files, volume mounts) is left to values overrides
+  — see the README "TLS" section.
+*/ -}}
 {{- $ns := .Release.Namespace }}
 {{- $chName := include "cluster.clickhouseName" . }}
 {{- $keeperName := include "cluster.keeperName" . }}
+{{- $chSvc := include "cluster.clickhouseServiceName" . }}
 {{- if and .Values.keeper.enabled (not .Values.tls.keeper.existingSecret) }}
 apiVersion: cert-manager.io/v1
 kind: Certificate
@@ -20,16 +28,12 @@ spec:
   issuerRef:
     name: {{ .Values.tls.issuerRef.name }}
     kind: {{ .Values.tls.issuerRef.kind }}
-  # Operator service pattern: <KeeperCluster.metadata.name>-keeper-headless
-  #
-  # Both forms are needed. A TLS wildcard matches exactly one label, so
-  # `*.<svc>.<ns>.svc` covers the per-Pod name and *not* the Service name itself
-  # — which is the name clients actually connect to.
+  # Altinity CHK services: keeper-{chk} and per-replica DNS
   dnsNames:
-    - "{{ $keeperName }}-keeper-headless.{{ $ns }}.svc"
-    - "{{ $keeperName }}-keeper-headless.{{ $ns }}.svc.cluster.local"
-    - "*.{{ $keeperName }}-keeper-headless.{{ $ns }}.svc"
-    - "*.{{ $keeperName }}-keeper-headless.{{ $ns }}.svc.cluster.local"
+    - "keeper-{{ $keeperName }}.{{ $ns }}.svc"
+    - "keeper-{{ $keeperName }}.{{ $ns }}.svc.cluster.local"
+    - "*.keeper-{{ $keeperName }}.{{ $ns }}.svc"
+    - "*.keeper-{{ $keeperName }}.{{ $ns }}.svc.cluster.local"
 ---
 {{- end }}
 {{- if and .Values.clickhouse.enabled (not .Values.tls.clickhouse.existingSecret) }}
@@ -47,19 +51,12 @@ spec:
   issuerRef:
     name: {{ .Values.tls.issuerRef.name }}
     kind: {{ .Values.tls.issuerRef.kind }}
-  # Operator service pattern: <ClickHouseCluster.metadata.name>-clickhouse-headless
-  #
-  # The bare Service names matter as much as the wildcards: a wildcard matches
-  # exactly one label, so `*.<svc>.<ns>.svc` covers per-Pod names only. Rotel and
-  # every query client dial the Service name, which no wildcard here matches.
   dnsNames:
-    - "{{ $chName }}-clickhouse-headless.{{ $ns }}.svc"
-    - "{{ $chName }}-clickhouse-headless.{{ $ns }}.svc.cluster.local"
-    - "*.{{ $chName }}-clickhouse-headless.{{ $ns }}.svc"
-    - "*.{{ $chName }}-clickhouse-headless.{{ $ns }}.svc.cluster.local"
-    {{- if .Values.clickhouse.service.enabled }}
-    - "{{ include "cluster.clickhouseServiceName" . }}.{{ $ns }}.svc"
-    - "{{ include "cluster.clickhouseServiceName" . }}.{{ $ns }}.svc.cluster.local"
-    {{- end }}
+    - "{{ $chSvc }}.{{ $ns }}.svc"
+    - "{{ $chSvc }}.{{ $ns }}.svc.cluster.local"
+    - "clickhouse-{{ $chName }}.{{ $ns }}.svc"
+    - "clickhouse-{{ $chName }}.{{ $ns }}.svc.cluster.local"
+    - "*.{{ $ns }}.svc"
+    - "*.{{ $ns }}.svc.cluster.local"
 {{- end }}
 {{- end }}

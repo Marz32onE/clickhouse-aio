@@ -12,11 +12,9 @@ immutable and an upgrade that changes it is rejected outright.
 {{/*
 Create a default fully qualified app name.
 
-This is the base name every resource hangs off: the KeeperCluster and
-ClickHouseCluster CRs (official examples give both the same name, which is what
-makes the operator's <name>-keeper-headless / <name>-clickhouse-headless
-services line up), the rotel Deployment/Service/Jobs, the generated password
-Secret, and the pre-created per-replica PVCs.
+Base name for CHI/CHK CRs, rotel Deployment/Service/Jobs, and the generated
+password Secret. Official Altinity examples often give CHI and CHK matching
+names; the chart does the same by default.
 */}}
 {{- define "cluster.fullname" -}}
 {{- if .Values.fullnameOverride }}
@@ -32,20 +30,24 @@ Secret, and the pre-created per-replica PVCs.
 {{- end }}
 
 {{/*
-ClickHouseCluster resource name. Renames only this CR — keeper.name is separate,
-so setting one and not the other splits the pair the operator's headless service
-names are derived from.
+ClickHouseInstallation (CHI) resource name.
 */}}
 {{- define "cluster.clickhouseName" -}}
 {{- default (include "cluster.fullname" .) .Values.clickhouse.name | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
 {{/*
-KeeperCluster resource name (defaults to the same base name as the
-ClickHouseCluster)
+ClickHouseKeeperInstallation (CHK) resource name.
 */}}
 {{- define "cluster.keeperName" -}}
 {{- default (include "cluster.fullname" .) .Values.keeper.name | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{/*
+Internal Keeper cluster name inside the CHK (configuration.clusters[].name).
+*/}}
+{{- define "cluster.keeperClusterName" -}}
+{{- default "cluster1" .Values.keeper.clusterName | trunc 15 | trimSuffix "-" }}
 {{- end }}
 
 {{/*
@@ -102,31 +104,15 @@ TLS certificate secret names
 {{- end }}
 
 {{/*
-Labels for every resource the operator creates for a CR — StatefulSets, Pods,
-the headless Service, ConfigMaps, Secrets, PodDisruptionBudgets. Emitted as the
-CR's spec.labels, which is the only hook the operator offers for this: the CRD's
-podTemplate has no labels field, and a structural schema prunes unknown fields
-without an error, so labels set there vanish between kubectl and etcd.
-
-commonLabels flows in here as well, so a label set once at the chart level
-reaches the operator-managed resources and not only the chart-managed ones.
-Component labels win on a key collision.
-
-Safe to change on a live cluster: the operator merges spec.labels into the
-StatefulSet's pod template but not into spec.selector (which the API server
-would refuse to update). The pod-template change does roll the StatefulSets.
-
-Call with (dict "root" $ "extra" .Values.clickhouse.labels).
+Labels merged into CR metadata and pod templates. Component labels win over
+commonLabels on a key collision.
 */}}
 {{- define "cluster.operatorResourceLabels" -}}
 {{- include "cluster.stringMap" (merge (dict) (.extra | default dict) (.root.Values.commonLabels | default dict)) -}}
 {{- end }}
 
 {{/*
-Render a map with every value coerced to a string. Both CRDs type spec.labels
-and spec.annotations as map[string]string, so a value that YAML reads as a bool
-or a number — `do-not-disrupt: true`, `revision: 3` — fails validation on apply.
-Quoting here means values.yaml does not have to remember to.
+Render a map with every value coerced to a string.
 */}}
 {{- define "cluster.stringMap" -}}
 {{- $out := dict -}}
@@ -137,31 +123,136 @@ Quoting here means values.yaml does not have to remember to.
 {{- end }}
 
 {{/*
-Guard for the two podTemplate fields the CRDs do not define. Both CRD schemas
-list podTemplate as affinity/imagePullSecrets/initContainers/nodeHostnameKey/
-nodeSelector/priorityClassName/runtimeClassName/schedulerName/securityContext/
-serviceAccountName/terminationGracePeriodSeconds/tolerations/
-topologySpreadConstraints/topologyZoneKey/volumes — no labels, no annotations,
-and no x-kubernetes-preserve-unknown-fields. Failing here beats letting the API
-server drop them silently.
+Flatten a nested map into Altinity slash-path settings keys.
 
-Call with (dict "root" $ "component" "clickhouse").
+  {logger: {level: information}}  ->  logger/level: information
+
+Scalars print as key: value. Lists print as YAML sequences under the path.
 */}}
-{{- define "cluster.rejectPodTemplateMetadata" -}}
-{{- $c := index .root.Values .component -}}
-{{- $pt := $c.podTemplate | default dict -}}
-{{- range $field := list "labels" "annotations" -}}
-{{- if index $pt $field -}}
-{{- fail (printf "%s.podTemplate.%s is not a field the CRD accepts — the API server prunes it silently, so it would never reach the Pods. Use %s.%s instead: it sets spec.%s on the CR, which the operator merges into every resource it creates for the cluster." $.component $field $.component $field $field) -}}
+{{- define "cluster.flattenSettings" -}}
+{{- include "cluster.flattenSettingsWalk" (dict "prefix" "" "data" .) -}}
+{{- end }}
+
+{{- define "cluster.flattenSettingsWalk" -}}
+{{- $prefix := .prefix -}}
+{{- range $k, $v := .data -}}
+  {{- $path := $k -}}
+  {{- if $prefix }}{{ $path = printf "%s/%s" $prefix $k }}{{ end -}}
+  {{- if kindIs "map" $v -}}
+    {{- include "cluster.flattenSettingsWalk" (dict "prefix" $path "data" $v) -}}
+  {{- else if kindIs "slice" $v -}}
+{{ $path }}:
+{{- range $item := $v }}
+  - {{ $item | toString | quote }}
+{{- end }}
+  {{- else -}}
+    {{- /* Avoid scientific notation on large ints parsed as float64; keep
+         trailing newline — {{- end -}} would eat it and glue keys together. */ -}}
+{{ printf "%s: %s\n" $path (include "cluster.configValue" $v | quote) }}
+  {{- end }}
+{{- end -}}
+{{- end }}
+
+{{/*
+Format a scalar for Altinity config.
+Large whole numbers must not become scientific notation (1e+09); ratios like
+0.9 must keep their fractional part.
+*/}}
+{{- define "cluster.configValue" -}}
+{{- if kindIs "float64" . -}}
+{{- if eq (floor .) . -}}
+{{- printf "%.0f" . -}}
+{{- else -}}
+{{- printf "%g" . -}}
+{{- end -}}
+{{- else -}}
+{{- . | toString -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Convert clickhouse.settings.extraUsersConfig.users (nested) into Altinity
+configuration.users flat keys.
+
+Supported per-user fields:
+  password / passwordSecret{name,key} / password_sha256_hex
+  profile, quota, networks.ip (string or list)
+  grants.query (list) or grants (list of strings)
+  databases.<db>.<table>.filter  -> row policy as files is out of scope;
+    filters are emitted as users.d XML via a simplified path when present:
+    user/databases/db/table/filter is NOT standard Altinity slash syntax for
+    row policies — Altinity uses grants + settings. For row filters we emit
+    <user>/databases/... only if the operator accepts it; prefer grants.
+*/}}
+{{- define "cluster.altinityUsers" -}}
+{{- $users := dig "extraUsersConfig" "users" (dict) .Values.clickhouse.settings -}}
+{{- range $user, $cfg := $users -}}
+{{- if $cfg -}}
+  {{- if and $cfg.passwordSecret $cfg.passwordSecret.name }}
+{{ $user }}/password:
+  valueFrom:
+    secretKeyRef:
+      name: {{ $cfg.passwordSecret.name | quote }}
+      key: {{ $cfg.passwordSecret.key | default "password" | quote }}
+  {{- else if and $cfg.password (kindIs "map" $cfg.password) (index $cfg.password "@from_env") }}
+    {{- $envName := index $cfg.password "@from_env" -}}
+    {{- $secretName := "" -}}
+    {{- $secretKey := "password" -}}
+    {{- range $.Values.clickhouse.containerTemplate.env | default list }}
+      {{- if and (eq .name $envName) .valueFrom .valueFrom.secretKeyRef }}
+        {{- $secretName = .valueFrom.secretKeyRef.name -}}
+        {{- $secretKey = .valueFrom.secretKeyRef.key | default "password" -}}
+      {{- end }}
+    {{- end }}
+    {{- if $secretName }}
+{{ $user }}/password:
+  valueFrom:
+    secretKeyRef:
+      name: {{ $secretName | quote }}
+      key: {{ $secretKey | quote }}
+    {{- else }}
+      {{- fail (printf "user %q: password @from_env %q has no matching containerTemplate.env secretKeyRef — set passwordSecret.name or add the env entry" $user $envName) }}
+    {{- end }}
+  {{- else if and $cfg.password (kindIs "string" $cfg.password) }}
+{{ $user }}/password: {{ $cfg.password | quote }}
+  {{- else if $cfg.password_sha256_hex }}
+{{ $user }}/password_sha256_hex: {{ $cfg.password_sha256_hex | quote }}
+  {{- end }}
+  {{- with $cfg.profile }}
+{{ $user }}/profile: {{ . | quote }}
+  {{- end }}
+  {{- with $cfg.quota }}
+{{ $user }}/quota: {{ . | quote }}
+  {{- end }}
+  {{- with $cfg.networks }}
+    {{- $ip := .ip }}
+    {{- if kindIs "slice" $ip }}
+{{ $user }}/networks/ip:
+      {{- range $ip }}
+  - {{ . | quote }}
+      {{- end }}
+    {{- else if $ip }}
+{{ $user }}/networks/ip: {{ $ip | quote }}
+    {{- end }}
+  {{- end }}
+  {{- $grantList := list -}}
+  {{- if and $cfg.grants $cfg.grants.query }}
+    {{- $grantList = $cfg.grants.query -}}
+  {{- else if and $cfg.grants (kindIs "slice" $cfg.grants) }}
+    {{- $grantList = $cfg.grants -}}
+  {{- end }}
+  {{- if $grantList }}
+{{ $user }}/grants/query:
+    {{- range $grantList }}
+  - {{ . | quote }}
+    {{- end }}
+  {{- end }}
 {{- end -}}
 {{- end -}}
 {{- end }}
 
 {{/*
-Client-facing ClickHouse Service name. Deliberately not <name>-clickhouse: the
-operator already uses that exact string for the cluster Secret
-(SpecificResourceName("")), and two different kinds sharing a name reads as a
-mistake even though Kubernetes allows it.
+Client-facing ClickHouse Service name (CHI serviceTemplate generateName).
 */}}
 {{- define "cluster.clickhouseServiceName" -}}
 {{- if .Values.clickhouse.service.name }}
@@ -183,8 +274,7 @@ Rotel collector resource name
 {{- end }}
 
 {{/*
-Pod metadata for the rotel schema/retention Jobs. Emits the `metadata:` key
-itself, since the labels below are always present.
+Pod metadata for the rotel schema/retention Jobs.
 */}}
 {{- define "cluster.rotelJobPodMetadata" -}}
 {{- $jobs := .root.Values.rotel.jobs | default dict -}}
@@ -202,8 +292,7 @@ metadata:
 {{- end }}
 
 {{/*
-Scheduling block shared by the rotel schema/retention Jobs. Emits nothing when
-none of the three is set.
+Scheduling block shared by the rotel schema/retention Jobs.
 */}}
 {{- define "cluster.rotelJobScheduling" -}}
 {{- $jobs := .Values.rotel.jobs | default dict -}}
@@ -222,14 +311,14 @@ affinity:
 {{- end }}
 
 {{/*
-ClickHouse service host the operator creates for the cluster
+ClickHouse service host clients and rotel should use (ClusterIP client service).
 */}}
 {{- define "cluster.clickhouseHost" -}}
-{{- printf "%s-clickhouse-headless.%s.svc.cluster.local" (include "cluster.clickhouseName" .) .Release.Namespace }}
+{{- printf "%s.%s.svc.cluster.local" (include "cluster.clickhouseServiceName" .) .Release.Namespace }}
 {{- end }}
 
 {{/*
-HTTP endpoint rotel uses to reach ClickHouse (override via rotel.exporter.endpoint)
+HTTP endpoint rotel uses to reach ClickHouse
 */}}
 {{- define "cluster.rotelClickhouseEndpoint" -}}
 {{- if .Values.rotel.exporter.endpoint }}
@@ -240,11 +329,7 @@ HTTP endpoint rotel uses to reach ClickHouse (override via rotel.exporter.endpoi
 {{- end }}
 
 {{/*
-Fully-qualified image reference. Registry, repository and tag are kept as three
-explicit values so a mirror or air-gapped registry is a one-key override rather
-than a rewrite of every repository string. An empty registry falls back to
-whatever the node's container runtime resolves the bare repository against.
-Call with an image dict, e.g. (include "cluster.image" .Values.rotel.image).
+Fully-qualified image reference.
 */}}
 {{- define "cluster.image" -}}
 {{- $repository := include "cluster.imageRepository" . -}}
@@ -256,9 +341,7 @@ Call with an image dict, e.g. (include "cluster.image" .Values.rotel.image).
 {{- end }}
 
 {{/*
-Registry-qualified repository, without the tag. The operator CRDs take
-repository and tag as separate fields, so the registry has to be folded into the
-repository for those.
+Registry-qualified repository, without the tag.
 */}}
 {{- define "cluster.imageRepository" -}}
 {{- $registry := .registry | default "" | toString | trimSuffix "/" -}}
@@ -270,11 +353,7 @@ repository for those.
 {{- end }}
 
 {{/*
-Table prefix for one signal. rotel names its tables <prefix>_<signal>
-(request_mapper.rs get_table_name), so the prefix is the only part of the table
-name that can be customised — the _traces/_logs/_metrics_* suffixes are fixed.
-rotel.exporter.<signal>.tablePrefix overrides rotel.exporter.tablePrefix.
-Call with (dict "root" $ "signal" "traces").
+Table prefix for one signal.
 */}}
 {{- define "cluster.rotelTablePrefix" -}}
 {{- $e := .root.Values.rotel.exporter -}}
@@ -287,14 +366,7 @@ Call with (dict "root" $ "signal" "traces").
 {{- end }}
 
 {{/*
-ClickHouse exporter groups for rotel's multi-exporter layout: one entry per
-distinct table prefix, listing the enabled signals routed to it. Signals that
-share a prefix share one exporter, and therefore one connection pool.
-
-Both the deployment and the DDL job read this, so the exporter rotel writes
-through and the tables the DDL job creates can never drift apart.
-
-Returns YAML: [{name: ch_otel, prefix: otel, signals: [traces, logs]}]
+ClickHouse exporter groups for rotel's multi-exporter layout.
 */}}
 {{- define "cluster.rotelExporterGroups" -}}
 {{- $telemetry := .Values.rotel.telemetry -}}
@@ -318,9 +390,7 @@ Returns YAML: [{name: ch_otel, prefix: otel, signals: [traces, logs]}]
 {{- end }}
 
 {{/*
-Env block for one ClickHouse exporter. rotel reads a named exporter's settings
-from ROTEL_EXPORTER_<NAME>_<FIELD> (init/config.rs args_from_env_prefix).
-Call with (dict "root" $ "name" "ch_otel" "prefix" "otel").
+Env block for one ClickHouse exporter.
 */}}
 {{- define "cluster.rotelClickhouseExporterEnv" -}}
 {{- $root := .root -}}
@@ -329,12 +399,6 @@ Call with (dict "root" $ "name" "ch_otel" "prefix" "otel").
 {{- if not (has $async (list "true" "false" "1" "0")) -}}
 {{- fail (printf "rotel.exporter.asyncInsert %q: must be true or false" $root.Values.rotel.exporter.asyncInsert) -}}
 {{- end -}}
-{{- /* The capitalisation is load-bearing. rotel types this field as String and
-     reads a named exporter's config through figment, which coerces "true",
-     "false", "1" and "0" to bool/number and then fails deserialisation with
-     `invalid type: found bool true, expected a string`. "True"/"False" parse as
-     neither, so they survive as strings, and rotel lowercases before matching
-     (init/parse.rs parse_bool_value). */ -}}
 {{- $asyncInsert := ternary "True" "False" (has $async (list "true" "1")) -}}
 - name: {{ $var }}_ENDPOINT
   value: {{ include "cluster.rotelClickhouseEndpoint" $root | quote }}
@@ -360,8 +424,7 @@ Call with (dict "root" $ "name" "ch_otel" "prefix" "otel").
 {{- end }}
 
 {{/*
-Secret holding the password rotel authenticates with (defaults to the
-ClickHouse default-user secret)
+Secret holding the password rotel authenticates with
 */}}
 {{- define "cluster.rotelPasswordSecretName" -}}
 {{- if .Values.rotel.exporter.existingSecret }}
@@ -380,8 +443,7 @@ ClickHouse default-user secret)
 {{- end }}
 
 {{/*
-Whether the otel database uses the Replicated engine, as "true"/"" so callers
-can use `if`. Validates the pairing it depends on.
+Whether the otel database uses the Replicated engine.
 */}}
 {{- define "cluster.rotelDatabaseReplicated" -}}
 {{- $e := .Values.rotel.exporter.databaseEngine | default "Atomic" -}}
@@ -408,10 +470,6 @@ Keeper path holding the Replicated database's DDL log.
 
 {{/*
 rotel.exporter.ttl as a whole number of seconds.
-
-The DDL tool only writes TTL at CREATE time, so the retention job re-applies it
-with ALTER ... MODIFY TTL and needs a unit ClickHouse understands. "0" disables
-retention.
 */}}
 {{- define "cluster.rotelTtlSeconds" -}}
 {{- $ttl := .Values.rotel.exporter.ttl | toString -}}
@@ -428,36 +486,12 @@ retention.
 {{- end }}
 
 {{/*
-ArgoCD sync-wave annotations, per component. Always emitted: the annotations are
-inert to `helm install`, so there is nothing to switch on. The operator subchart
-is un-annotated and therefore wave 0, which every wave here sits behind.
+ArgoCD sync-wave annotations, per component.
 
-  1  certs               cert-manager Certificates the CRs mount Secrets from
-  2  keeper, pvc         KeeperCluster; the per-replica PVCs
-  3  clickhouse          ClickHouseCluster
-     clickhouse-service  its ClusterIP client Service
-  4  rotel               the collector, which needs ClickHouse reachable
-
-Keeper is a wave ahead of ClickHouse because the operator does not gate the
-ClickHouse rollout on Keeper: reconcileClusterRevisions blocks only while the
-KeeperCluster object is *missing*, and once it exists a Ready condition that is
-still false is logged and passed over
-(internal/controller/clickhouse/sync.go in ClickHouse/clickhouse-operator). The
-keeper endpoint list is built from spec.replicas, not from running pods, so the
-ClickHouse config renders and the StatefulSets roll while Keeper has no quorum.
-Nothing corrupts — the server retries the connection — but `ON CLUSTER` DDL
-fails and replicated tables stay read-only until quorum forms. The wave split is
-what actually orders the two.
-
-The PVCs land a wave ahead of ClickHouseCluster because a StatefulSet adopts
-only a claim that already exists when it creates the Pod. A plain `helm install`
-gets that from Helm's own kind ordering, which puts PersistentVolumeClaim ahead
-of custom resources.
-
-Waves only order what ArgoCD can call Healthy, and an unknown custom resource is
-Healthy the moment it is created — so this degrades to apply-ordering until the
-CR health checks are registered in argocd-cm. See "Deploying with ArgoCD" in the
-README.
+  1  certs
+  2  keeper
+  3  clickhouse (+ client service via CHI serviceTemplate)
+  4  rotel
 
 Usage: include "cluster.argocdAnnotations" "keeper"
 */}}
@@ -467,8 +501,6 @@ Usage: include "cluster.argocdAnnotations" "keeper"
 {{- fail (printf "cluster.argocdAnnotations: unknown component %q — expected one of %v" . (keys $waves | sortAlpha)) }}
 {{- end -}}
 argocd.argoproj.io/sync-wave: {{ index $waves . | quote }}
-{{- /* Dry-run needs the CRD registered, and it is the operator's own sync that
-       registers it. Core kinds are always there and need no opt-out. */}}
 {{- if has . (list "certs" "keeper" "clickhouse") }}
 argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
 {{- end }}

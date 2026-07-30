@@ -1,65 +1,29 @@
-## Default values for the cluster subchart.
-## Parent chart (clickhouse) overrides these for production small-business sizing.
+## Default values for the cluster subchart (Altinity CHI/CHK).
+## Parent chart overrides these for production small-business sizing.
 
-## Replaces the chart name inside the generated fullname, and is also the value
-## of app.kubernetes.io/name. That label is part of the selector labels, and a
-## Deployment's spec.selector cannot be changed after creation — so this is an
-## install-time decision. Changing it on a live release makes the upgrade fail
-## until the rotel Deployment is deleted by hand.
 nameOverride: ""
-
-## Replaces the generated fullname outright. This is the base name of the
-## KeeperCluster and ClickHouseCluster CRs (both take the same one, which is
-## what lines the operator's headless service names up), the rotel
-## Deployment/Service/Jobs, the generated password Secret and the pre-created
-## per-replica PVCs. Safe to set on an install; changing it later renames every
-## one of those, which the operator sees as a new cluster.
 fullnameOverride: ""
-
-## Labels added to every resource in the release — the chart's own (the CRs, the
-## rotel Deployment/Service/Jobs, the Secret, the PVCs) and, through each CR's
-## spec.labels, the ones the operator creates from them (StatefulSets, Pods,
-## headless Services, ConfigMaps, PodDisruptionBudgets).
-##
-## keeper.labels / clickhouse.labels add to this per component and win on a key
-## collision. Reaching the operator's resources means these end up in the Pod
-## template, so changing them rolls the StatefulSets.
 commonLabels: {}
 
 # ---------------------------------------------------------------------------
-# ClickHouse Keeper (coordination — required for replication)
+# ClickHouse Keeper (ClickHouseKeeperInstallation)
 # ---------------------------------------------------------------------------
 keeper:
   enabled: true
-  ## Override KeeperCluster metadata.name. Renames only this CR — set
-  ## clickhouse.name too if the pair should keep matching names.
-  ## Default: the chart fullname.
   name: ""
-  ## Odd number required for quorum. Do not change after first deploy.
   replicas: 3
-
-  ## Registry, repository and tag are separate so a mirror is a one-key override.
-  ## Pinned to a full four-part version, not a rolling 26.x stream: a Keeper
-  ## quorum and the servers talking to it have to move together, deliberately.
+  clusterName: cluster1
   image:
     registry: docker.io
     repository: clickhouse/clickhouse-keeper
     tag: "26.7.1.1315"
     pullPolicy: IfNotPresent
-
-  ## No annotations key here: the CRD's dataVolumeClaimSpec is a bare
-  ## PersistentVolumeClaimSpec with no metadata, and the operator builds the
-  ## claim itself, so there is nowhere for them to land. Annotations that must
-  ## reach the claims go on keeper.annotations — the operator stamps spec
-  ## annotations onto the StatefulSet's volumeClaimTemplates, which Kubernetes
-  ## then treats as immutable.
   persistence:
     storageClassName: ""
     accessModes:
       - ReadWriteOnce
     size: 20Gi
-
-  ## Small-business production resources (coordination is light vs server)
+    annotations: {}
   resources:
     requests:
       cpu: 500m
@@ -67,171 +31,40 @@ keeper:
     limits:
       cpu: "1"
       memory: 2Gi
-
-  ## Labels and annotations added to everything the operator creates for this
-  ## KeeperCluster: the StatefulSets, their Pods, the headless Service, the
-  ## ConfigMaps, the PodDisruptionBudgets. They become spec.labels /
-  ## spec.annotations on the CR, which is the only metadata hook the operator
-  ## offers — podTemplate has no labels or annotations field, and the API server
-  ## drops unknown fields without an error, so setting them there is a no-op.
-  ## The chart rejects that spelling rather than letting it disappear.
-  ##
-  ## commonLabels (top of this file) is merged in as well; these win on a key
-  ## collision, and operator-owned labels win over both.
-  ##
-  ## Changing either rolls the StatefulSets — both land in the Pod template.
-  ## Neither enters spec.selector, so a live cluster accepts the change.
-  ## One caution on annotations: the operator also stamps them onto the
-  ## StatefulSet's volumeClaimTemplates, which Kubernetes treats as immutable.
   labels: {}
-  # labels:
-  #   tier: storage
   annotations: {}
-  # annotations:
-  #   karpenter.sh/do-not-disrupt: "true"     # keep the autoscaler off a quorum member
-  #   prometheus.io/scrape: "false"
-
+  antiAffinity: true
   podTemplate:
-    ## Placement keys, both at the values the operator's API reference
-    ## recommends. They drive two different operator-generated rules:
-    ##
-    ##   topologyZoneKey  — the domain pods holding the same data are balanced
-    ##                      across. Emits a *required* TopologySpreadConstraint
-    ##                      (maxSkew 1, DoNotSchedule) plus a *preferred*
-    ##                      PodAntiAffinity over this key.
-    ##   nodeHostnameKey  — exclusive node occupancy. Emits a *required*
-    ##                      PodAntiAffinity across every pod of the cluster: at
-    ##                      most one per node, regardless of shard.
-    ##
-    ## Fewer zones than replicas is fine — maxSkew 1 lets several replicas share
-    ## a domain, still evenly balanced. What does strand pods is a node with no
-    ## zone label at all (DoNotSchedule skips it), and nodeHostnameKey on a
-    ## cluster with fewer nodes than replicas. Clear the keys for a single-node
-    ## install — see "Dev / local cluster" in the README.
     topologyZoneKey: topology.kubernetes.io/zone
     nodeHostnameKey: kubernetes.io/hostname
-    ## No labels/annotations here — the CRD's podTemplate has neither field, and
-    ## the API server prunes unknown fields silently. Use keeper.labels /
-    ## keeper.annotations above; the chart fails the render if they appear here.
-    ##
-    ## Pin the pods to a node pool. Keeper is latency-sensitive and small, so
-    ## it usually wants the same nodes as ClickHouse rather than a spot pool.
     nodeSelector: {}
-    # nodeSelector:
-    #   node-role.kubernetes.io/database: "true"
-    ## Needed when those nodes are tainted — a nodeSelector alone does not let a
-    ## pod onto a tainted node.
     tolerations: []
-    # tolerations:
-    #   - key: dedicated
-    #     operator: Equal
-    #     value: clickhouse
-    #     effect: NoSchedule
-    ## Appended to the operator's own rules rather than replacing them, so a
-    ## required rule added here cannot be relaxed by a later upgrade.
     affinity: {}
-    # affinity:
-    #   nodeAffinity:
-    #     requiredDuringSchedulingIgnoredDuringExecution:
-    #       nodeSelectorTerms:
-    #         - matchExpressions:
-    #             - key: topology.kubernetes.io/zone
-    #               operator: In
-    #               values: [ap-northeast-1a, ap-northeast-1c]
-    ## The operator's own field, passed through verbatim. Entries merge into the
-    ## operator defaults by topologyKey, so repeating topologyZoneKey's value
-    ## replaces the required DoNotSchedule constraint it generates, and any other
-    ## key adds one alongside. Omit labelSelector when targeting topologyZoneKey:
-    ## the operator fills in the pod labels, including the shard id, and a
-    ## constraint with an empty selector matches nothing.
-    ##
-    ## Relaxing the operator's spread is a deliberate step away from the HA
-    ## posture its docs recommend, so it is spelled out in full rather than
-    ## hidden behind a chart-invented shorthand:
-    # topologySpreadConstraints:
-    #   - maxSkew: 1
-    #     topologyKey: topology.kubernetes.io/zone
-    #     whenUnsatisfiable: ScheduleAnyway
     topologySpreadConstraints: []
-
   settings: {}
-  # settings:
-  #   extraConfig:
-  #     logger/level: information
 
 # ---------------------------------------------------------------------------
-# ClickHouse server cluster
+# ClickHouse server (ClickHouseInstallation)
 # ---------------------------------------------------------------------------
 clickhouse:
   enabled: true
-  ## Override ClickHouseCluster metadata.name. Renames only this CR — the
-  ## KeeperCluster keeps its own name (keeper.name), so setting one and not the
-  ## other splits the pair. It also moves the per-replica PVC names below, and
-  ## the rotel exporter endpoint follows it. Default: the chart fullname.
   name: ""
-  ## Replicas per shard (HA). Every replica holds the full dataset.
   replicas: 3
-  ## Horizontal partitions. Keep 1: the otel_* tables have no Distributed table
-  ## in front of them, so >1 shard makes each query see only one shard's rows.
   shards: 1
-
-  ## Keep this on the same version as the Keeper image above.
+  clusterName: default
   image:
     registry: docker.io
     repository: clickhouse/clickhouse-server
     tag: "26.7.1.1315"
     pullPolicy: IfNotPresent
-
   persistence:
+    enabled: true
     storageClassName: ""
     accessModes:
       - ReadWriteOnce
-    ## Per-replica data volume — sized for small production analytics
     size: 200Gi
     annotations: {}
-
-    ## Give individual replicas their own StorageClass (or size).
-    ##
-    ## The CRD carries a single dataVolumeClaimSpec for the whole cluster, so
-    ## the operator cannot vary it per replica. It does create one StatefulSet
-    ## per replica with a deterministic claim name, though, and a StatefulSet
-    ## adopts a claim that already carries that name without checking its
-    ## StorageClass. Listing a replica here pre-creates that claim; anything not
-    ## listed keeps using the settings above.
-    ##
-    ## Claim name: <volumeName>-<clickhouseName>-clickhouse-<shard>-<replica>-0
-    ##
-    ## The cluster name has to stay short: past a 63-character StatefulSet name
-    ## the operator shortens the middle and splices in a hash, and the predicted
-    ## claim would belong to nothing. The chart refuses to render then — keep
-    ## the name at 48 characters or fewer for single-digit shard/replica.
-    ##
-    ## Only meaningful when the replicas are deliberately asymmetric — a cold
-    ## replica kept for backups, say. ClickHouse replication assumes comparable
-    ## hardware, and rotel writes through the headless Service, so a slower
-    ## replica both lags on merges and still serves its share of queries.
-    ##
-    ## The claims are kept on uninstall (helm.sh/resource-policy: keep), and
-    ## size changes here do not reach a claim that already exists — expand it
-    ## with `kubectl patch pvc` instead.
-    perReplica: []
-    # perReplica:
-    #   - replica: 0
-    #     storageClassName: fast-nvme
-    #   - replica: 1
-    #     storageClassName: standard-ssd
-    #     size: 500Gi
-    #     ## shard defaults to 0; set it on a multi-shard cluster
-    #     # shard: 0
-    #     # accessModes: [ReadWriteOnce]
-    #     # labels: {}
-    #     # annotations: {}
-
-    ## Name of the volume claim template the operator generates. Only change it
-    ## if a future operator release renames it — the pre-created claims above
-    ## have to match it exactly or the StatefulSet makes its own.
-    volumeName: clickhouse-storage-volume
-
+    volumeName: clickhouse-data
   resources:
     requests:
       cpu: "2"
@@ -239,274 +72,84 @@ clickhouse:
     limits:
       cpu: "4"
       memory: 16Gi
-
-  ## Labels and annotations added to everything the operator creates for this
-  ## ClickHouseCluster: StatefulSets, Pods, the headless Service, ConfigMaps,
-  ## Secrets, PodDisruptionBudgets. See the keeper.labels comment above for why
-  ## these live here and not under podTemplate, and for the two cautions
-  ## (rolling restart, immutable volumeClaimTemplates).
   labels: {}
-  # labels:
-  #   tier: database
   annotations: {}
-  # annotations:
-  #   karpenter.sh/do-not-disrupt: "true"
-
+  antiAffinity: true
+  antiAffinityScope: ClickHouseInstallation
   podTemplate:
-    ## See the keeper.podTemplate comments above for what each field does.
-    ## labels/annotations are not among them — use clickhouse.labels /
-    ## clickhouse.annotations above.
     topologyZoneKey: topology.kubernetes.io/zone
     nodeHostnameKey: kubernetes.io/hostname
     nodeSelector: {}
-    # nodeSelector:
-    #   node-role.kubernetes.io/database: "true"
     tolerations: []
-    # tolerations:
-    #   - key: dedicated
-    #     operator: Equal
-    #     value: clickhouse
-    #     effect: NoSchedule
     affinity: {}
     topologySpreadConstraints: []
     volumes: []
-
-  ## default user authentication
   defaultUser:
-    ## Create a Secret from plaintext (dev only). Prefer existingSecret in prod.
     password: ""
-    ## Existing Secret name containing the password key
     existingSecret: ""
-    ## Key inside the secret (default: password)
     existingSecretKey: password
-    ## password | password_sha256_hex | password_double_sha1_hex
     passwordType: password
-    ## When true and no password/secret is set, generate a random password Secret
     autoGenerate: true
-
-  ## Reference to KeeperCluster (auto-wired when keeper.enabled)
   keeperClusterRef:
     name: ""
-
-  ## Version-detection Job the operator runs before each (re)deploy.
-  ## Operator default is 256Mi which OOMs with clickhouse-server >= 26.x
-  ## (clickhouse-local startup footprint grew). Bump via this override.
-  versionProbe:
-    resources:
-      requests:
-        cpu: 250m
-        memory: 512Mi
-      limits:
-        cpu: "1"
-        memory: 1Gi
-    ## Scheduling for the probe Pod. The CRD exposes only nodeSelector here —
-    ## there is no tolerations or affinity field, so a probe cannot be placed on
-    ## a tainted node the ClickHouse pods themselves tolerate.
-    # nodeSelector:
-    #   node-role.kubernetes.io/database: "true"
-    nodeSelector: {}
-    labels: {}
-    annotations: {}
-    # annotations:
-    #   karpenter.sh/do-not-disrupt: "true"
-
-  ## Server / user settings (official operator settings block)
+    namespace: ""
+    serviceType: ""
+  keeper:
+    host: ""
+    port: 2181
+  clusterSecret:
+    enabled: true
+    secure: false
+    auto: true
+    value: ""
+    valueFrom:
+      secretKeyRef:
+        name: ""
+        key: secret
   settings:
-    enableDatabaseSync: true
-    ## Server-level config (YAML → ClickHouse config)
-    extraConfig:
-      # Production-lean defaults for small business
-      max_concurrent_queries: 100
-      max_server_memory_usage_to_ram_ratio: 0.9
-      background_pool_size: 16
-      background_merges_mutations_concurrency_ratio: 2
-      mark_cache_size: 5368709120          # 5 GiB
-      uncompressed_cache_size: 8589934592  # 8 GiB
-      logger:
-        level: information
-        console: 1
-      # Prometheus metrics need no config here: the operator exposes
-      # port 9363 automatically (protocols.prometheus).
-
-    ## Users, profiles and row policies, passed through to the operator
-    ## verbatim. This is the only user mechanism the chart offers — grants say
-    ## which tables a user may read, and a per-table `filter` narrows that to a
-    ## subset of rows. A grant alone always means the *whole* table.
-    ##
-    ## Shape notes, both of them easy to get wrong:
-    ##   * `grants` is one `query` key holding a list. A list of {query: ...}
-    ##     maps renders as repeated <grants> XML elements and ClickHouse honours
-    ##     only the first, silently dropping the rest.
-    ##   * a table under `databases` with no `filter` is not a restriction — the
-    ##     filter is what limits the rows, the grant is what allows the table.
-    ##
-    ## Passwords come from container env (see containerTemplate.env below), so
-    ## they reach neither the CR nor preprocessed_configs/users.xml. The chart
-    ## generates no Secret for these users: point secretKeyRef at your own.
-    ##
-    ## Users defined here are read-only at runtime — adding a table later means
-    ## editing this and running `helm upgrade`, not a GRANT statement.
-    ##
-    ## When this outgrows the file, split it into a second values file and pass
-    ## both with `-f` — the operator cannot source users from a ConfigMap or
-    ## Secret, so the values layer is the only place the split can happen.
+    extraConfig: {}
     extraUsersConfig: {}
-    # extraUsersConfig:
-    #   profiles:
-    #     readonly_user:
-    #       readonly: 1
-    #   users:
-    #     ## Whole-table reader
-    #     reporter:
-    #       password: {"@from_env": CH_REPORTER_PASSWORD, "@hide_in_preprocessed": true}
-    #       profile: readonly_user
-    #       networks: {ip: "::/0"}
-    #       grants:
-    #         query:
-    #           - GRANT SELECT ON otel.otel_traces
-    #     ## Same grants, narrowed to one Kubernetes namespace by a row policy.
-    #     ## Requires the telemetry to carry the namespace itself — rotel does
-    #     ## not enrich spans, so instrumented workloads must publish it:
-    #     ##   env:
-    #     ##     - name: POD_NAMESPACE
-    #     ##       valueFrom: {fieldRef: {fieldPath: metadata.namespace}}
-    #     ##     - name: OTEL_RESOURCE_ATTRIBUTES
-    #     ##       value: k8s.namespace.name=$(POD_NAMESPACE)
-    #     ## Rows missing the attribute belong to no one and stay invisible.
-    #     team_a:
-    #       password: {"@from_env": CH_TEAM_A_PASSWORD, "@hide_in_preprocessed": true}
-    #       profile: readonly_user
-    #       networks: {ip: "::/0"}
-    #       databases:
-    #         otel:
-    #           otel_traces:
-    #             filter: "ResourceAttributes['k8s.namespace.name'] IN ('team-a')"
-    #           otel_logs:
-    #             filter: "ResourceAttributes['k8s.namespace.name'] IN ('team-a')"
-    #       grants:
-    #         query:
-    #           - GRANT SELECT ON otel.otel_traces
-    #           - GRANT SELECT ON otel.otel_logs
-
-  ## Extra container ports. Port 9363 is reserved by the operator for
-  ## Prometheus metrics — the validation webhook rejects it here.
   additionalPorts: []
-
   containerTemplate:
     env: []
     volumeMounts: []
-
-  ## Client-facing ClusterIP Service — the endpoint Grafana, BI tools and
-  ## anything else running a SELECT should point at.
-  ##
-  ## The operator itself only creates <name>-clickhouse-headless, which is not a
-  ## substitute for two reasons. It has no VIP, so a client resolves it straight
-  ## to Pod IPs and a pooled connection keeps talking to a Pod that has since
-  ## gone unhealthy. And the operator sets publishNotReadyAddresses: true on it,
-  ## so its DNS deliberately includes Pods that are not ready yet. A ClusterIP
-  ## Service over the same Pods puts kube-proxy in front of both problems:
-  ## ready endpoints only, re-evaluated per connection.
-  ##
-  ## In-cluster reachability only. Grafana Cloud or anything outside the cluster
-  ## needs an Ingress or LoadBalancer, neither of which this chart creates.
-  ##
-  ## Valid only while shards == 1. With more shards this load-balances across
-  ## shards and each query returns whichever shard answered — see the sharding
-  ## note in the README before raising clickhouse.shards.
   service:
     enabled: true
-    ## Defaults to <clickhouse name>-clickhouse-client
     name: ""
     annotations: {}
-    ## Ports follow tls.*: plaintext 8123/9000 until TLS is both enabled and
-    ## required, secure 8443/9440 whenever TLS is enabled. Same rule the
-    ## operator applies to the server's listeners.
-    ##
-    ## ClientIP pins each client to one replica. Worth setting for dashboards
-    ## that compare values across refreshes: replicas sit at different points in
-    ## replication, so round-robin can make a counter appear to go backwards.
     sessionAffinity: ""
 
 # ---------------------------------------------------------------------------
-# Rotel — lightweight Rust OTLP collector writing traces into ClickHouse
-# https://github.com/rotel-dev/rotel
-# Schema-compatible with the OpenTelemetry ClickHouse exporter (otel_traces …).
+# Rotel
 # ---------------------------------------------------------------------------
 rotel:
   enabled: false
-  ## Override the collector's resource name (default: <fullname>-rotel).
-  ## This is the OTLP endpoint hostname apps point at, so changing it on a live
-  ## install means repointing every SDK.
   name: ""
   replicas: 1
-
   image:
     registry: docker.io
     repository: streamfold/rotel
     tag: "v0.2.2"
     pullPolicy: IfNotPresent
-
-  ## Companion image creating the otel_* table DDL (rotel does not auto-create).
-  ## Keep on the same version as the agent image above — they ship together and
-  ## the DDL has to match the schema the exporter inserts against.
   ddlImage:
     registry: docker.io
     repository: streamfold/rotel-clickhouse-ddl
     tag: "v0.2.2"
     pullPolicy: IfNotPresent
-
-  ## Run a post-install/upgrade Job that creates database + tables
   createSchema: true
-
-  ## Run a post-install/upgrade Job that re-applies exporter.ttl to the existing
-  ## otel tables, making the value below effective on upgrades rather than only
-  ## at table-creation time. Reuses each table's own TTL expression, so a table
-  ## created with ttl=0s is skipped — it has none to modify.
   manageTtl: true
-
-  ## Which OTLP signals to accept and store. Each enabled signal gets its tables
-  ## created by the DDL job and an exporter wired in the deployment; disabling
-  ## one also closes its OTLP receiver.
   telemetry:
     traces: true
     logs: true
-    ## App OTLP metrics → ClickHouse. Independent of internalMetrics: with only
-    ## internalMetrics on, the metrics receiver stays open but anything sent to
-    ## it goes to VictoriaMetrics rather than ClickHouse — see below.
     metrics: false
-
-  ## Agent log format for stdout (ROTEL_LOG_FORMAT). text | json
-  ## These are pod logs only; they are never written to ClickHouse.
   logFormat: json
-
-  ## Rotel's own runtime metrics (--enable-internal-telemetry), shipped OTLP/HTTP
-  ## to VictoriaMetrics. Rotel only starts the internal-metrics pipeline when the
-  ## regular metrics pipeline is active, so enabling this also holds the OTLP
-  ## metrics receiver open. With telemetry.metrics off, app metrics sent to that
-  ## receiver therefore land in VictoriaMetrics; with it on, they go to
-  ## ClickHouse as usual and only Rotel's own metrics go to VictoriaMetrics.
   internalMetrics:
     enabled: false
-    ## VictoriaMetrics OTLP *base* URL — Rotel appends /v1/metrics.
-    ## Single-node: http://vmsingle.<ns>.svc:8428/opentelemetry
-    ## Cluster:     http://vminsert.<ns>.svc:8480/insert/0/opentelemetry
     endpoint: ""
-
   exporter:
-    ## Default: http://<cluster>-clickhouse-headless.<ns>.svc.cluster.local:8123
     endpoint: ""
     database: otel
-    ## Default table prefix. Rotel builds table names as <prefix>_<signal>, so
-    ## "otel" gives otel_traces / otel_logs / otel_metrics_*. Only the prefix is
-    ## configurable — the suffixes are fixed by rotel's schema.
     tablePrefix: otel
-    ## Per-signal overrides of the prefix above (empty = inherit). Signals that
-    ## end up sharing a prefix share one exporter and one connection pool;
-    ## differing prefixes get one exporter each. The database is shared.
-    ##   traces: {tablePrefix: app}  ->  otel.app_traces
-    ##   logs:   {tablePrefix: sys}  ->  otel.sys_logs
-    ## Changing a prefix on a live install creates a new empty table; the old one
-    ## keeps its rows and keeps ageing out under its own TTL.
     traces:
       tablePrefix: ""
     logs:
@@ -514,45 +157,16 @@ rotel:
     metrics:
       tablePrefix: ""
     user: default
-    ## Reuse the ClickHouse default-user secret unless set
     existingSecret: ""
     existingSecretKey: password
     compression: lz4
     asyncInsert: true
-    ## ClickHouse JSON column type for attributes (needs recent ClickHouse)
     enableJson: false
-    ## MergeTree for single replica; ReplicatedMergeTree + cluster for HA
     engine: MergeTree
-    ## remote_servers cluster name (operator default: "default"). Required by
-    ## databaseEngine=Replicated, and used for ON CLUSTER DDL under Atomic.
     cluster: ""
-    ## Database engine.
-    ##
-    ## Replicated writes every DDL statement to a Keeper log that all members
-    ## replay, so a replica added later inherits the schema *including table
-    ## UUIDs*. That matters because the table path is
-    ## /clickhouse/tables/{uuid}/{shard}: under Atomic, a brand-new replica has
-    ## no tables until the DDL job next runs, and CREATE TABLE IF NOT EXISTS
-    ## then gives it a fresh UUID — a separate table that is not a replica of
-    ## the others, silently splitting writes. ON CLUSTER only aligns UUIDs when
-    ## every host creates the table in the same statement.
-    ##
-    ## Atomic is the plain local database, fine for a single replica. It is also
-    ## what installs created before this option existed use; switching an
-    ## existing database is not possible in place — see the README.
-    ##
-    ## Requires cluster to be set. Under Replicated the DDL tool and the TTL job
-    ## drop ON CLUSTER, which the database engine would otherwise double-execute.
     databaseEngine: Replicated
-    ## Keeper path holding the database's DDL log. Empty derives
-    ## /clickhouse/databases/<database>.
     databaseReplicaPath: ""
-    ## Row TTL for otel tables ("0s" = keep forever). Accepts <number><s|m|h|d>.
-    ## The DDL tool only writes TTL when it creates a table, so changing this on
-    ## an existing install does nothing on its own — manageTtl below re-applies
-    ## it with ALTER ... MODIFY TTL after every upgrade.
     ttl: 168h
-
   resources:
     requests:
       cpu: 50m
@@ -560,98 +174,41 @@ rotel:
     limits:
       cpu: 500m
       memory: 512Mi
-
-  ## HorizontalPodAutoscaler for the rotel Deployment. Needs metrics-server for
-  ## the cpu/memory targets. When enabled the Deployment stops rendering
-  ## replicas, so helm no longer resets what the HPA chose on every upgrade.
-  ##
-  ## Utilization is a percentage of resources.requests above, so those must be
-  ## set for the target they drive. Scaling out multiplies the number of
-  ## in-flight ClickHouse inserts: with async_insert on, more replicas means more
-  ## smaller batches, so raise exporter batch sizes before raising maxReplicas.
   autoscaling:
     enabled: false
     minReplicas: 1
     maxReplicas: 5
-    ## 0 disables that target. At least one of these (or metrics below) required.
     targetCPUUtilizationPercentage: 75
     targetMemoryUtilizationPercentage: 0
-    ## Extra autoscaling/v2 metric entries appended verbatim, e.g. an external
-    ## OTLP-queue-depth metric.
     metrics: []
-    ## autoscaling/v2 scaling behavior, appended verbatim. Empty uses the
-    ## Kubernetes defaults (scale-down stabilises over 5 minutes).
     behavior: {}
-
   service:
     type: ClusterIP
     annotations: {}
-
-  ## Collector Pod scheduling. The collector is stateless and sits on the OTLP
-  ## hot path, so it usually wants to be near the workloads sending telemetry
-  ## rather than pinned to the database nodes.
   podLabels: {}
-  # podLabels:
-  #   tier: telemetry
   podAnnotations: {}
-  # podAnnotations:
-  #   prometheus.io/scrape: "false"
-  #   karpenter.sh/do-not-disrupt: "true"      # avoid dropping in-flight batches
   nodeSelector: {}
-  # nodeSelector:
-  #   node-role.kubernetes.io/observability: "true"
   tolerations: []
-  # tolerations:
-  #   - key: dedicated
-  #     operator: Equal
-  #     value: observability
-  #     effect: NoSchedule
   affinity: {}
-  # affinity:
-  #   podAntiAffinity:
-  #     preferredDuringSchedulingIgnoredDuringExecution:
-  #       - weight: 100
-  #         podAffinityTerm:
-  #           topologyKey: kubernetes.io/hostname
-  #           labelSelector:
-  #             matchLabels:
-  #               app.kubernetes.io/component: rotel
   extraArgs: []
   extraEnv: []
-
-  ## Scheduling for the schema (createSchema) and retention (manageTtl) Jobs.
-  ## They are short-lived helm hooks that talk to ClickHouse over HTTP, so they
-  ## normally belong wherever the ClickHouse pods are reachable. Give them the
-  ## database tolerations if that node pool is tainted — an unschedulable hook
-  ## Job blocks the whole `helm upgrade` until it times out.
   jobs:
     podLabels: {}
     podAnnotations: {}
-    # podAnnotations:
-    #   sidecar.istio.io/inject: "false"       # a sidecar keeps the Job Running forever
     nodeSelector: {}
-    # nodeSelector:
-    #   node-role.kubernetes.io/database: "true"
     tolerations: []
-    # tolerations:
-    #   - key: dedicated
-    #     operator: Equal
-    #     value: clickhouse
-    #     effect: NoSchedule
     affinity: {}
 
 # ---------------------------------------------------------------------------
-# Optional in-cluster TLS (requires cert-manager + issuer)
+# TLS (cert-manager Certificates only; wire into CHI/CHK separately)
 # ---------------------------------------------------------------------------
 tls:
   enabled: false
-  ## When true, insecure ports are disabled
   required: true
-  ## Create cert-manager Certificates (needs an Issuer/ClusterIssuer)
   createCertificates: true
   issuerRef:
     name: ""
-    kind: Issuer   # or ClusterIssuer
+    kind: Issuer
   clickhouse:
     existingSecret: ""
   keeper:

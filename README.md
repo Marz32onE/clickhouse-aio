@@ -4,8 +4,8 @@ Production-oriented **all-in-one Helm chart** for ClickHouse on Kubernetes.
 
 | Subchart | Source | Role |
 |----------|--------|------|
-| **operator** | Official [`clickhouse-operator-helm`](https://clickhouse.com/docs/clickhouse-operator/overview), vendored at `charts/clickhouse-operator-helm/` | ClickHouse Inc operator + CRDs (`ClickHouseCluster` / `KeeperCluster`, `clickhouse.com/v1alpha1`) |
-| **cluster** | Local (`charts/cluster`) | The CRs themselves, plus the [Rotel](https://github.com/rotel-dev/rotel) OTLP collector and its schema/TTL Jobs |
+| **operator** | [Altinity clickhouse-operator](https://github.com/Altinity/clickhouse-operator/blob/master/docs/quick_start.md) Helm chart, vendored at `charts/altinity-clickhouse-operator/` | Altinity operator + CRDs (`ClickHouseInstallation` / `ClickHouseKeeperInstallation`) |
+| **cluster** | Local (`charts/cluster`) | The CHI/CHK CRs, plus the [Rotel](https://github.com/rotel-dev/rotel) OTLP collector and its schema/TTL Jobs |
 
 Default profile targets a **small-business production** footprint: HA without over-sharding.
 
@@ -20,9 +20,9 @@ Default profile targets a **small-business production** footprint: HA without ov
            ┌───────────────────────┼───────────────────────┐
            ▼                                               ▼
  ┌─────────────────────┐                     ┌──────────────────────────┐
- │ operator (official) │                     │ cluster (local subchart) │
- │ CRDs + controller   │  reconciles ──────► │ KeeperCluster (3)        │
- │ webhooks + metrics  │                     │ ClickHouseCluster (1×3)  │
+ │ operator (Altinity) │                     │ cluster (local subchart) │
+ │ CRDs + controller   │  reconciles ──────► │ CHK Keeper (3)           │
+ │ metrics exporter    │                     │ CHI ClickHouse (1×3)     │
  └─────────────────────┘                     └──────────────────────────┘
                                              │ rotel Deployment + Svc   │
                                              │ DDL Job / TTL Job        │
@@ -46,22 +46,14 @@ so a mirror is a one-key override and no tag floats:
 | Image | Default |
 |-------|---------|
 | ClickHouse server / Keeper | `docker.io/clickhouse/clickhouse-{server,keeper}:26.7.1.1315` |
-| Operator | `ghcr.io/clickhouse/clickhouse-operator:v0.0.7` |
+| Operator | `altinity/clickhouse-operator:0.27.2` + `altinity/metrics-exporter:0.27.2` |
 | Rotel + DDL tool | `docker.io/streamfold/rotel{,-clickhouse-ddl}:v0.2.2` |
 
 ## Prerequisites
 
-1. **Kubernetes** ≥ 1.28 (operator docs recommend 1.33+)
-2. **Helm** ≥ 3.8 (OCI charts)
-3. **cert-manager** (default operator webhooks)
-
-```bash
-helm install cert-manager oci://quay.io/jetstack/charts/cert-manager \
-  --namespace cert-manager --create-namespace \
-  --set crds.enabled=true --version v1.21.0
-```
-
-4. A **StorageClass** suitable for databases (SSD, expandable). Set:
+1. **Kubernetes** ≥ 1.25 (Altinity operator 0.16+)
+2. **Helm** ≥ 3.8
+3. A **StorageClass** suitable for databases (SSD, expandable). Set:
 
 ```yaml
 cluster:
@@ -74,6 +66,23 @@ cluster:
 ```
 
 ## Install
+
+### Local kind / single-node
+
+```bash
+make deps
+make install VALUES=values-local.yaml PASSWORD='localdev'
+kubectl -n clickhouse get chi,chk,pods
+kubectl -n clickhouse exec deploy/chi-ch-aio-cluster-default-0-0 -- \
+  clickhouse-client --password localdev -q 'SELECT version()'
+# or the StatefulSet pod:
+kubectl -n clickhouse exec chi-ch-aio-cluster-default-0-0-0 -- \
+  clickhouse-client --password localdev -q 'SELECT version()'
+```
+
+`values-local.yaml` drops anti-affinity, uses 1 Keeper + 1 ClickHouse replica, smaller disks, and skips the rotel TTL hook (single-node `clusterAllReplicas` auth).
+
+### Production
 
 ```bash
 # From this repo root
@@ -140,8 +149,8 @@ helm upgrade --install ch-aio . -n clickhouse \
 ## Verify
 
 ```bash
-kubectl get pods,keeperclusters,clickhouseclusters -n clickhouse
-kubectl get chc,keeperclusters -n clickhouse   # short names if available
+kubectl get pods,chi,chk -n clickhouse
+kubectl get chi,chk -n clickhouse -o wide
 
 # Client
 kubectl exec -it -n clickhouse <clickhouse-pod> -- clickhouse-client
@@ -171,8 +180,8 @@ kubectl exec -it -n clickhouse <clickhouse-pod> -- clickhouse-client
 | `cluster.rotel.exporter.databaseEngine` | `Replicated` | Keeps a new replica's table UUIDs aligned |
 | `cluster.rotel.exporter.ttl` | `168h` | Retention; `<n><s\|m\|h\|d>`, `0s` = forever |
 | `cluster.rotel.manageTtl` | `true` | Re-apply `ttl` to existing tables on upgrade |
-| `operator.rbac.namespaced` | `true` | Role instead of ClusterRole |
-| `operator.controller.watchNamespaces` | `[clickhouse]` | Must equal the release namespace |
+| `operator.rbac.namespaceScoped` | `true` | Role instead of ClusterRole |
+| `operator.watchNamespaces` | `[clickhouse]` | Must equal the release namespace |
 | `cluster.clickhouse.settings.extraUsersConfig` | `reporter` | Users, profiles, row filters |
 | `cluster.*.podTemplate.topologyZoneKey` | `topology.kubernetes.io/zone` | Domain replicas spread across |
 | `cluster.*.podTemplate.nodeHostnameKey` | `kubernetes.io/hostname` | One pod per node; excess stay `Pending` |
@@ -213,7 +222,7 @@ Consequences worth knowing:
 Check it landed with the CR's own condition:
 
 ```bash
-kubectl get clickhousecluster <name> -o jsonpath='{.status.conditions[?(@.type=="SchemaInSync")]}'
+kubectl get chi <name> -o wide   # STATUS=Completed when hosts are ready
 # ReplicasInSync / "All replicas are in sync"
 ```
 
@@ -270,7 +279,7 @@ value for every table.
 
 ### Operator RBAC scope
 
-`operator.rbac.namespaced: true` gives the operator a Role/RoleBinding in its
+`operator.rbac.namespaceScoped: true` gives the operator a Role/RoleBinding in its
 own namespace instead of a ClusterRole, so it can only touch StatefulSets,
 Secrets, PVCs and custom resources there. Two consequences:
 
@@ -285,7 +294,7 @@ Secrets, PVCs and custom resources there. Two consequences:
 Two ClusterRoles remain when `metrics.secure` is on; they cover only the
 `TokenReview`/`SubjectAccessReview` calls that authenticate metrics scrapes.
 
-To manage clusters across several namespaces, set `operator.rbac.namespaced:
+To manage clusters across several namespaces, set `operator.rbac.namespaceScoped:
 false` and either list them in `watchNamespaces` or leave it empty for
 cluster-wide.
 
@@ -403,7 +412,7 @@ operator itself gives up entirely somewhere past ~52 characters, where the
 `<name>-clickhouse` label it applies exceeds 63 bytes and reconcile fails.
 
 Ordering is the whole trick — the claim has to exist before the operator creates
-the StatefulSet. The PVCs sync in wave 2, one ahead of the `ClickHouseCluster`,
+the StatefulSet. The PVCs sync in wave 2, one ahead of the `CHI`,
 and a plain `helm install` gets it from Helm's own kind ordering, which puts
 `PersistentVolumeClaim` ahead of custom resources.
 
@@ -446,7 +455,7 @@ headless Service, ConfigMaps, Secrets, PodDisruptionBudgets. That is what
 `cluster.commonLabels` feeds the same `spec.labels`, so a label set once at the
 chart level now reaches the operator-managed resources too, not just the
 chart-managed ones. Per-component `labels` are merged on top and win on a key
-collision; operator-owned labels (`app`, `clickhouse.com/*`) win over both.
+collision; operator-owned labels (`clickhouse.altinity.com/*`) win over both.
 
 Two cautions. Both fields land in the StatefulSet pod template, so changing them
 rolls the pods — they do **not** enter `spec.selector`, so a live cluster does
@@ -466,8 +475,8 @@ all derive from it.
 |-----|---------|-----------------------|
 | `cluster.fullnameOverride` | all of the above, together | Yes on paper, but the operator reads the new CR as a different cluster |
 | `cluster.nameOverride` | the same names, **plus `app.kubernetes.io/name`** | **No — install-time only** |
-| `cluster.clickhouse.name` | the ClickHouseCluster CR and the per-replica PVCs | No |
-| `cluster.keeper.name` | the KeeperCluster CR | No |
+| `cluster.clickhouse.name` | the ClickHouseInstallation (CHI) CR and the per-replica PVCs | No |
+| `cluster.keeper.name` | the ClickHouseKeeperInstallation (CHK) CR | No |
 | `cluster.rotel.name` | the collector Deployment/Service/Jobs | Only by repointing every SDK |
 
 `nameOverride` is the one to be careful with: `app.kubernetes.io/name` is a
@@ -483,7 +492,7 @@ exporter endpoint follows the ClickHouse one.
 
 The operator derives scheduling rules from two keys rather than taking a raw pod
 spec. Both are at the values its
-[API reference](https://clickhouse.com/docs/products/kubernetes-operator/reference/api-reference)
+[CHI/CHK custom resource docs](https://github.com/Altinity/clickhouse-operator/blob/master/docs/custom_resource_explained.md)
 recommends:
 
 | Key | Default | Operator emits |
@@ -574,8 +583,8 @@ wave 0, and the cluster follows in dependency order:
 |------|-----------|
 | 0 | operator (Deployment, CRDs, RBAC, webhooks) |
 | 1 | cert-manager `Certificate`s, when `tls.createCertificates` |
-| 2 | `KeeperCluster`, pre-created per-replica PVCs |
-| 3 | `ClickHouseCluster`, the ClusterIP client Service |
+| 2 | `CHK`, pre-created per-replica PVCs |
+| 3 | `CHI`, the ClusterIP client Service |
 | 4 | Rotel Deployment / Service / HPA |
 
 The CRs also carry `SkipDryRunOnMissingResource=true`, so the first sync does not
@@ -585,7 +594,7 @@ PostSync hook — after every wave.
 
 **Keeper is a wave ahead of ClickHouse on purpose.** The operator does not gate
 the ClickHouse rollout on Keeper. Its `reconcileClusterRevisions` step blocks
-only while the `KeeperCluster` *object* is missing; once the object exists, a
+only while the `CHK` *object* is missing; once the object exists, a
 `Ready` condition that is still false is logged and passed over
 ([`internal/controller/clickhouse/sync.go`](https://github.com/ClickHouse/clickhouse-operator)).
 The keeper endpoint list is built from `spec.replicas` rather than from running
@@ -635,7 +644,7 @@ starts while Keeper is still electing a leader and the whole split collapses bac
 to apply-ordering. Add to `argocd-cm`:
 
 ```yaml
-resource.customizations.health.clickhouse.com_KeeperCluster: |
+resource.customizations.health.clickhouse-keeper.altinity.com_ClickHouseKeeperInstallation: |
   hs = {}
   if obj.status ~= nil and obj.status.conditions ~= nil then
     for _, c in ipairs(obj.status.conditions) do
@@ -646,7 +655,7 @@ resource.customizations.health.clickhouse.com_KeeperCluster: |
   end
   hs.status = "Progressing"; hs.message = "waiting for quorum"
   return hs
-resource.customizations.health.clickhouse.com_ClickHouseCluster: |
+resource.customizations.health.clickhouse.altinity.com_ClickHouseInstallation: |
   hs = {}
   if obj.status ~= nil and obj.status.conditions ~= nil then
     for _, c in ipairs(obj.status.conditions) do
@@ -659,7 +668,7 @@ resource.customizations.health.clickhouse.com_ClickHouseCluster: |
   return hs
 ```
 
-Both gate on `Ready`, not `Healthy`. On a `KeeperCluster` the operator sets
+Both gate on `Ready`, not `Healthy`. On a `CHK` the operator sets
 `Ready` from quorum — one leader plus `ceil(n/2) - 1` followers — while `Healthy`
 means *every* replica is serving. Quorum is what ClickHouse needs, and gating on
 `Healthy` would stall wave 3 on a single unavailable Keeper pod that the cluster
@@ -716,7 +725,7 @@ helm dependency update
 
 ### Operator-only install
 
-Same namespace as the cluster — `operator.rbac.namespaced` scopes the operator's
+Same namespace as the cluster — `operator.rbac.namespaceScoped` scopes the operator's
 Role to its own namespace. See "Operator RBAC scope" above.
 
 ```bash
@@ -836,7 +845,7 @@ resolves it straight to Pod IPs; a connection pool then holds those IPs and
 keeps using a Pod after it goes unhealthy. And the operator sets
 `publishNotReadyAddresses: true` on it, so its DNS deliberately hands out Pods
 that are still starting. The ClusterIP Service selects the same Pods
-(`app=<cluster-name>-clickhouse`, `clickhouse.com/role=clickhouse-server`) with
+(labels set by the Altinity operator, e.g. `clickhouse.altinity.com/chi`, `clickhouse.altinity.com/app=chop`) with
 kube-proxy in front, so only ready endpoints receive traffic and liveness is
 re-checked per connection rather than at DNS-resolution time.
 
@@ -911,14 +920,14 @@ so the migration is a rename plus a `CREATE TABLE`, not a data copy.
 
 ```bash
 helm uninstall ch-aio -n clickhouse
-# PVCs are retained by default — delete carefully
+# PVCs are retained by default (reclaimPolicy: Retain) — delete carefully
 kubectl delete pvc -n clickhouse -l app.kubernetes.io/instance=ch-aio
-# CRDs kept when operator.crd.keep=true
+# CRDs are cluster-scoped and survive uninstall (operator crdHook / Helm crds/)
 ```
 
 ## References
 
-- [Introducing the Official ClickHouse Kubernetes Operator](https://clickhouse.com/blog/clickhouse-kubernetes-operator)
-- [Operator docs](https://clickhouse.com/docs/clickhouse-operator/overview)
-- [Configuration guide](https://clickhouse.com/docs/clickhouse-operator/guides/configuration)
+- [Altinity Operator Quick Start](https://github.com/Altinity/clickhouse-operator/blob/master/docs/quick_start.md)
+- [Altinity Operator docs](https://docs.altinity.com/altinitykubernetesoperator/)
+- [Altinity Helm charts](https://github.com/Altinity/helm-charts/tree/main/charts/clickhouse)
 - [Rotel](https://github.com/streamfold/rotel) — collector and ClickHouse exporter
