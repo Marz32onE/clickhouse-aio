@@ -7,10 +7,8 @@ metadata:
   labels:
     {{- include "cluster.labels" . | nindent 4 }}
     app.kubernetes.io/component: keeper
-  {{- with include "cluster.argocdAnnotations" . }}
   annotations:
-    {{- . | nindent 4 }}
-  {{- end }}
+    {{- include "cluster.argocdAnnotations" "keeper" | nindent 4 }}
 spec:
   {{- /*
   See the note on the ClickHouseCluster: spec.labels / spec.annotations are the

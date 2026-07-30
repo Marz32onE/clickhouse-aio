@@ -428,26 +428,48 @@ retention.
 {{- end }}
 
 {{/*
-ArgoCD ordering annotations: cluster resources sync in a later wave than the
-operator (un-annotated = wave 0), and dry-run is skipped while the CRDs the
-operator ships are not registered yet.
+ArgoCD sync-wave annotations, per component. Always emitted: the annotations are
+inert to `helm install`, so there is nothing to switch on. The operator subchart
+is un-annotated and therefore wave 0, which every wave here sits behind.
+
+  1  certs               cert-manager Certificates the CRs mount Secrets from
+  2  keeper, pvc         KeeperCluster; the per-replica PVCs
+  3  clickhouse          ClickHouseCluster
+     clickhouse-service  its ClusterIP client Service
+  4  rotel               the collector, which needs ClickHouse reachable
+
+Keeper is a wave ahead of ClickHouse because the operator does not gate the
+ClickHouse rollout on Keeper: reconcileClusterRevisions blocks only while the
+KeeperCluster object is *missing*, and once it exists a Ready condition that is
+still false is logged and passed over
+(internal/controller/clickhouse/sync.go in ClickHouse/clickhouse-operator). The
+keeper endpoint list is built from spec.replicas, not from running pods, so the
+ClickHouse config renders and the StatefulSets roll while Keeper has no quorum.
+Nothing corrupts — the server retries the connection — but `ON CLUSTER` DDL
+fails and replicated tables stay read-only until quorum forms. The wave split is
+what actually orders the two.
+
+The PVCs land a wave ahead of ClickHouseCluster because a StatefulSet adopts
+only a claim that already exists when it creates the Pod. A plain `helm install`
+gets that from Helm's own kind ordering, which puts PersistentVolumeClaim ahead
+of custom resources.
+
+Waves only order what ArgoCD can call Healthy, and an unknown custom resource is
+Healthy the moment it is created — so this degrades to apply-ordering until the
+CR health checks are registered in argocd-cm. See "Deploying with ArgoCD" in the
+README.
+
+Usage: include "cluster.argocdAnnotations" "keeper"
 */}}
 {{- define "cluster.argocdAnnotations" -}}
-{{- if .Values.argocd.enabled }}
-argocd.argoproj.io/sync-wave: {{ .Values.argocd.syncWave | quote }}
+{{- $waves := dict "certs" 1 "keeper" 2 "pvc" 2 "clickhouse" 3 "clickhouse-service" 3 "rotel" 4 -}}
+{{- if not (hasKey $waves .) }}
+{{- fail (printf "cluster.argocdAnnotations: unknown component %q — expected one of %v" . (keys $waves | sortAlpha)) }}
+{{- end -}}
+argocd.argoproj.io/sync-wave: {{ index $waves . | quote }}
+{{- /* Dry-run needs the CRD registered, and it is the operator's own sync that
+       registers it. Core kinds are always there and need no opt-out. */}}
+{{- if has . (list "certs" "keeper" "clickhouse") }}
 argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
-{{- end }}
-{{- end }}
-
-{{/*
-ArgoCD ordering for the pre-created per-replica PVCs: one wave earlier than the
-CRs, because a StatefulSet only adopts a claim that already exists when it
-creates the Pod. No SkipDryRunOnMissingResource — a PVC is a core kind that is
-always registered. Plain `helm install` needs no equivalent: its own kind
-ordering puts PersistentVolumeClaim ahead of custom resources.
-*/}}
-{{- define "cluster.argocdPvcAnnotations" -}}
-{{- if .Values.argocd.enabled }}
-argocd.argoproj.io/sync-wave: {{ sub (int .Values.argocd.syncWave) 1 | quote }}
 {{- end }}
 {{- end }}

@@ -70,9 +70,7 @@ metadata:
     # Unlike the claims a StatefulSet creates itself, this one belongs to the
     # release and would be garbage-collected with it, taking the data along.
     helm.sh/resource-policy: keep
-    {{- with include "cluster.argocdPvcAnnotations" $ }}
-    {{- . | trim | nindent 4 }}
-    {{- end }}
+    {{- include "cluster.argocdAnnotations" "pvc" | nindent 4 }}
     {{- with $persistence.annotations }}
     {{- toYaml . | nindent 4 }}
     {{- end }}

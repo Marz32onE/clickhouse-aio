@@ -6,14 +6,11 @@ metadata:
   labels:
     {{- include "cluster.labels" . | nindent 4 }}
     app.kubernetes.io/component: clickhouse
-  {{- $svcAnnotations := merge (dict) (.Values.clickhouse.service.annotations | default dict) }}
-  {{- if .Values.argocd.enabled }}
-  {{- $_ := set $svcAnnotations "argocd.argoproj.io/sync-wave" .Values.argocd.syncWave }}
-  {{- end }}
-  {{- with $svcAnnotations }}
+  {{- /* Chart-owned keys are the merge destination, so they win a collision
+         with clickhouse.service.annotations. */}}
+  {{- $svcAnnotations := merge (include "cluster.argocdAnnotations" "clickhouse-service" | fromYaml) (.Values.clickhouse.service.annotations | default dict) }}
   annotations:
-    {{- toYaml . | nindent 4 }}
-  {{- end }}
+    {{- toYaml $svcAnnotations | nindent 4 }}
 spec:
   type: ClusterIP
   {{- with .Values.clickhouse.service.sessionAffinity }}

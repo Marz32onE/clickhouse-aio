@@ -250,7 +250,8 @@ cluster:
       size: 200Gi
       ## Give individual replicas their own StorageClass or size. The chart
       ## pre-creates those claims under the name the StatefulSet would generate,
-      ## one ArgoCD wave ahead of the CRs, and the StatefulSet adopts them.
+      ## one ArgoCD wave ahead of the ClickHouseCluster, and the StatefulSet
+      ## adopts them.
       ## Only for deliberately asymmetric replicas — ClickHouse replication
       ## assumes comparable hardware. See charts/cluster/values.yaml.
       perReplica: []

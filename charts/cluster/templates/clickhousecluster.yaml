@@ -11,10 +11,8 @@ metadata:
   labels:
     {{- include "cluster.labels" . | nindent 4 }}
     app.kubernetes.io/component: clickhouse
-  {{- with include "cluster.argocdAnnotations" . }}
   annotations:
-    {{- . | nindent 4 }}
-  {{- end }}
+    {{- include "cluster.argocdAnnotations" "clickhouse" | nindent 4 }}
 spec:
   {{- /*
   spec.labels / spec.annotations are the operator's only metadata hook: it

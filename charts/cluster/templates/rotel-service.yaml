@@ -6,14 +6,11 @@ metadata:
   labels:
     {{- include "cluster.labels" . | nindent 4 }}
     app.kubernetes.io/component: rotel
-  {{- $svcAnnotations := merge (dict) (.Values.rotel.service.annotations | default dict) }}
-  {{- if .Values.argocd.enabled }}
-  {{- $_ := set $svcAnnotations "argocd.argoproj.io/sync-wave" .Values.argocd.syncWave }}
-  {{- end }}
-  {{- with $svcAnnotations }}
+  {{- /* Chart-owned keys are the merge destination, so they win a collision
+         with rotel.service.annotations. */}}
+  {{- $svcAnnotations := merge (include "cluster.argocdAnnotations" "rotel" | fromYaml) (.Values.rotel.service.annotations | default dict) }}
   annotations:
-    {{- toYaml . | nindent 4 }}
-  {{- end }}
+    {{- toYaml $svcAnnotations | nindent 4 }}
 spec:
   type: {{ .Values.rotel.service.type }}
   selector:

@@ -403,9 +403,9 @@ operator itself gives up entirely somewhere past ~52 characters, where the
 `<name>-clickhouse` label it applies exceeds 63 bytes and reconcile fails.
 
 Ordering is the whole trick — the claim has to exist before the operator creates
-the StatefulSet. The PVCs sync one ArgoCD wave ahead of the CRs
-(`syncWave - 1`), and a plain `helm install` gets it from Helm's own kind
-ordering, which puts `PersistentVolumeClaim` ahead of custom resources.
+the StatefulSet. The PVCs sync in wave 2, one ahead of the `ClickHouseCluster`,
+and a plain `helm install` gets it from Helm's own kind ordering, which puts
+`PersistentVolumeClaim` ahead of custom resources.
 
 Two things to know before using it. The claims carry
 `helm.sh/resource-policy: keep`, so `helm uninstall` leaves them behind — unlike
@@ -565,12 +565,35 @@ from the remaining StatefulSets to let the rollout finish.
 
 ### Deploying with ArgoCD
 
-One Application can install operator + cluster in order. Enable
-`cluster.argocd.enabled`: cluster resources get
-`argocd.argoproj.io/sync-wave: "1"` (operator resources stay wave 0) plus
-`SkipDryRunOnMissingResource=true`, so ArgoCD deploys the operator, waits for
-it to be healthy, then syncs the CRs. The rotel DDL Job carries Helm
-`post-install/post-upgrade` hooks, which ArgoCD runs as a PostSync hook.
+One Application installs operator + cluster in order. There is nothing to turn
+on: every chart-owned resource ships an `argocd.argoproj.io/sync-wave`, which a
+plain `helm install` ignores. Operator resources are un-annotated and therefore
+wave 0, and the cluster follows in dependency order:
+
+| Wave | Resources |
+|------|-----------|
+| 0 | operator (Deployment, CRDs, RBAC, webhooks) |
+| 1 | cert-manager `Certificate`s, when `tls.createCertificates` |
+| 2 | `KeeperCluster`, pre-created per-replica PVCs |
+| 3 | `ClickHouseCluster`, the ClusterIP client Service |
+| 4 | Rotel Deployment / Service / HPA |
+
+The CRs also carry `SkipDryRunOnMissingResource=true`, so the first sync does not
+fail dry-run against CRDs the operator has not registered yet. The rotel DDL and
+TTL Jobs carry Helm `post-install/post-upgrade` hooks, which ArgoCD runs as a
+PostSync hook — after every wave.
+
+**Keeper is a wave ahead of ClickHouse on purpose.** The operator does not gate
+the ClickHouse rollout on Keeper. Its `reconcileClusterRevisions` step blocks
+only while the `KeeperCluster` *object* is missing; once the object exists, a
+`Ready` condition that is still false is logged and passed over
+([`internal/controller/clickhouse/sync.go`](https://github.com/ClickHouse/clickhouse-operator)).
+The keeper endpoint list is built from `spec.replicas` rather than from running
+pods, so the ClickHouse config renders and the StatefulSets roll while Keeper has
+no quorum. Nothing corrupts — the server retries the connection — but `ON CLUSTER`
+DDL fails and replicated tables stay read-only until quorum forms. The wave split
+is what actually orders the two, which makes the health checks below load-bearing
+rather than cosmetic.
 
 ```yaml
 apiVersion: argoproj.io/v1beta1
@@ -587,8 +610,6 @@ spec:
     helm:
       values: |
         cluster:
-          argocd:
-            enabled: true
           clickhouse:
             defaultUser:
               existingSecret: ch-default-password   # create it out-of-band
@@ -608,37 +629,57 @@ spec:
       backoff: {duration: 20s, factor: 2, maxDuration: 3m}
 ```
 
-Notes:
-- **Password must come from an existing Secret** (or a fixed value). ArgoCD
-  renders manifests without cluster access, so the chart's lookup-based
-  auto-generation would rotate the password every sync — the chart fails fast
-  if you try.
-- For accurate Application health (waves gate on it), register health checks
-  for the CRs in `argocd-cm`:
+**Register the CR health checks — the waves are inert without them.** ArgoCD
+calls an unknown custom resource Healthy the moment it is created, so wave 3
+starts while Keeper is still electing a leader and the whole split collapses back
+to apply-ordering. Add to `argocd-cm`:
 
 ```yaml
-resource.customizations.health.clickhouse.com_ClickHouseCluster: |
-  hs = {}
-  if obj.status ~= nil and obj.status.conditions ~= nil then
-    for _, c in ipairs(obj.status.conditions) do
-      if c.type == "Healthy" and c.status == "True" then
-        hs.status = "Healthy"; hs.message = "all shards ready"; return hs
-      end
-    end
-  end
-  hs.status = "Progressing"; hs.message = "waiting for replicas"
-  return hs
 resource.customizations.health.clickhouse.com_KeeperCluster: |
   hs = {}
   if obj.status ~= nil and obj.status.conditions ~= nil then
     for _, c in ipairs(obj.status.conditions) do
-      if c.type == "Healthy" and c.status == "True" then
-        hs.status = "Healthy"; hs.message = "keeper ready"; return hs
+      if c.type == "Ready" and c.status == "True" then
+        hs.status = "Healthy"; hs.message = c.message; return hs
       end
     end
   end
   hs.status = "Progressing"; hs.message = "waiting for quorum"
   return hs
+resource.customizations.health.clickhouse.com_ClickHouseCluster: |
+  hs = {}
+  if obj.status ~= nil and obj.status.conditions ~= nil then
+    for _, c in ipairs(obj.status.conditions) do
+      if c.type == "Ready" and c.status == "True" then
+        hs.status = "Healthy"; hs.message = c.message; return hs
+      end
+    end
+  end
+  hs.status = "Progressing"; hs.message = "waiting for replicas"
+  return hs
+```
+
+Both gate on `Ready`, not `Healthy`. On a `KeeperCluster` the operator sets
+`Ready` from quorum — one leader plus `ceil(n/2) - 1` followers — while `Healthy`
+means *every* replica is serving. Quorum is what ClickHouse needs, and gating on
+`Healthy` would stall wave 3 on a single unavailable Keeper pod that the cluster
+tolerates fine.
+
+**The password has to come from an existing Secret** (or a fixed value). ArgoCD
+renders manifests without cluster access, so the `lookup` behind
+`defaultUser.autoGenerate` finds nothing and mints a new password on every sync.
+The chart cannot detect this — a renderer gives no way to tell "no cluster" from
+"first install" — so it does not try to fail fast; setting
+`defaultUser.existingSecret` is on you. If `autoGenerate` has to stay, stop
+ArgoCD from reconciling the value it re-renders:
+
+```yaml
+  ignoreDifferences:
+    - group: ""
+      kind: Secret
+      name: clickhouse-cluster-default-password   # <release>-cluster-default-password
+      jsonPointers:
+        - /data
 ```
 
 ### Offline / air-gapped install

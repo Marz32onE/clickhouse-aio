@@ -26,16 +26,6 @@ fullnameOverride: ""
 ## template, so changing them rolls the StatefulSets.
 commonLabels: {}
 
-## ArgoCD integration: annotate cluster resources with a sync-wave so the
-## operator (wave 0) is deployed and healthy before the CRs sync, and skip
-## dry-run while the operator's CRDs are not registered yet.
-## Requires defaultUser.existingSecret (or a fixed password): ArgoCD renders
-## templates without cluster access, so lookup-based password generation
-## would mint a new password on every sync.
-argocd:
-  enabled: false
-  syncWave: "1"
-
 # ---------------------------------------------------------------------------
 # ClickHouse Keeper (coordination — required for replication)
 # ---------------------------------------------------------------------------

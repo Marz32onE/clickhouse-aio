@@ -26,10 +26,8 @@ metadata:
   labels:
     {{- include "cluster.labels" . | nindent 4 }}
     app.kubernetes.io/component: rotel
-  {{- with include "cluster.argocdAnnotations" . }}
   annotations:
-    {{- . | nindent 4 }}
-  {{- end }}
+    {{- include "cluster.argocdAnnotations" "rotel" | nindent 4 }}
 spec:
   scaleTargetRef:
     apiVersion: apps/v1

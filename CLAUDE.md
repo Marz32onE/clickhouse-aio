@@ -46,7 +46,7 @@ charts/cluster/         the local subchart: the CRs, Rotel, and the schema/TTL J
 
 `values.yaml` (root, `cluster.*`) and `charts/cluster/values.yaml` are near-mirrors: the root file is the small-business production profile and wins; the subchart file is the standalone default. They are **not** generated from each other — a key added to one and not the other drifts silently, and a comment corrected in one leaves the other wrong. Change both, and prefix correctly (`cluster.clickhouse.replicas` at the root, `clickhouse.replicas` in the subchart).
 
-Not everything is mirrored: `argocd.enabled` exists only in the subchart file, and the root file's `settings.users` block ships an active `reporter` user where the subchart's is commented out.
+Not everything is mirrored: the root file's `settings.users` block ships an active `reporter` user where the subchart's is commented out.
 
 ## Architecture
 
@@ -63,7 +63,7 @@ Templates `fail` early rather than letting a bad render reach the cluster. Every
 Current guards, all worth knowing before changing defaults:
 
 - `operator.rbac.namespaced=true` requires `controller.watchNamespaces == [release namespace]` exactly. Empty means cluster-wide, which a namespaced Role cannot serve. (`templates/validate-rbac-scope.yaml`)
-- `argocd.enabled` + `defaultUser.autoGenerate` + no fixed password → fail. ArgoCD renders without cluster access, so the `lookup` that preserves the generated password returns nothing and it rotates every sync.
+- `cluster.argocdAnnotations` fails on an unknown component name. Every chart-owned resource gets a sync-wave — there is no toggle, and no per-resource literal: add the component to the `$waves` dict in `_helpers.tpl` rather than writing the annotation inline. The wave order (certs 1, keeper+PVCs 2, ClickHouse 3, rotel 4) is what orders Keeper ahead of ClickHouse; the operator itself only *logs* when Keeper is not Ready, so nothing else does.
 - `rotel.exporter.databaseEngine=Replicated` requires `exporter.cluster` set and `engine=ReplicatedMergeTree`.
 - `{keeper,clickhouse}.podTemplate.{labels,annotations}` → fail with a pointer to `{keeper,clickhouse}.{labels,annotations}`. The CRD's `podTemplate` has no metadata fields and a structural schema prunes unknown ones without erroring, so setting them there would vanish between `kubectl` and etcd.
 - `persistence.perReplica` indices must be inside `replicas`/`shards`, unique, and the cluster name ≤ ~48 chars — past that the operator truncates the StatefulSet name and splices in a hash, orphaning the pre-created claim.
