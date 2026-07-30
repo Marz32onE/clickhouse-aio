@@ -1,0 +1,91 @@
+{{- /*
+Per-replica data volumes.
+
+The CRD carries one dataVolumeClaimSpec for the whole cluster, so the operator
+cannot give a replica its own StorageClass. It does create one StatefulSet per
+replica with a deterministic claim name, and a StatefulSet adopts a claim that
+already carries that name without ever comparing its StorageClass against the
+template. Pre-creating the claim here is that adoption, which means it has to
+exist *before* the operator creates the StatefulSet — hence the earlier ArgoCD
+sync-wave, and Helm's own kind ordering (PVC before custom resources) for a
+plain install.
+
+A claim not listed here is left to the operator and follows persistence.*.
+*/ -}}
+{{- if .Values.clickhouse.enabled }}
+{{- $persistence := .Values.clickhouse.persistence }}
+{{- $perReplica := $persistence.perReplica | default list }}
+{{- if $perReplica }}
+{{- $volumeName := $persistence.volumeName | default "clickhouse-storage-volume" }}
+{{- $chName := include "cluster.clickhouseName" . }}
+{{- $replicas := .Values.clickhouse.replicas | int }}
+{{- $shards := .Values.clickhouse.shards | int }}
+{{- $seen := dict }}
+{{- range $i, $entry := $perReplica }}
+{{- if not (hasKey $entry "replica") }}
+{{- fail (printf "clickhouse.persistence.perReplica[%d]: replica is required (0-based index of the replica this claim belongs to)" $i) }}
+{{- end }}
+{{- $replica := $entry.replica | int }}
+{{- $shard := dig "shard" 0 $entry | int }}
+{{- if or (lt $replica 0) (ge $replica $replicas) }}
+{{- fail (printf "clickhouse.persistence.perReplica[%d]: replica %d is outside clickhouse.replicas (%d)" $i $replica $replicas) }}
+{{- end }}
+{{- if or (lt $shard 0) (ge $shard $shards) }}
+{{- fail (printf "clickhouse.persistence.perReplica[%d]: shard %d is outside clickhouse.shards (%d)" $i $shard $shards) }}
+{{- end }}
+{{- $key := printf "%d/%d" $shard $replica }}
+{{- if hasKey $seen $key }}
+{{- fail (printf "clickhouse.persistence.perReplica[%d]: shard %d replica %d is claimed twice" $i $shard $replica) }}
+{{- end }}
+{{- $_ := set $seen $key true }}
+{{- $statefulSetName := printf "%s-clickhouse-%d-%d" $chName $shard $replica }}
+{{- /*
+     The operator caps a StatefulSet name at 63 characters and, past that,
+     shortens the middle and splices in a hash — an observed 50-character
+     cluster name yields `<name>-cli-7215-0-0`, not `<name>-clickhouse-0-0`.
+     The claim name predicted here would then belong to no StatefulSet, and the
+     one that is actually created would quietly build its own claim from the
+     template, on the default StorageClass. That is exactly the silent fallback
+     this feature exists to avoid, so refuse to render instead.
+*/ -}}
+{{- if gt (len $statefulSetName) 63 }}
+{{- fail (printf "clickhouse.persistence.perReplica[%d]: %q is too long — the operator would shorten the StatefulSet name %q (%d chars, max 63) and splice in a hash, leaving this claim unused. Shorten the release name or set cluster.fullnameOverride / clickhouse.name to at most %d characters." $i $chName $statefulSetName (len $statefulSetName) (sub 63 (sub (len $statefulSetName) (len $chName)))) }}
+{{- end }}
+{{- $claimName := printf "%s-0" $statefulSetName | printf "%s-%s" $volumeName }}
+{{- $size := $entry.size | default $persistence.size }}
+{{- $storageClassName := $entry.storageClassName | default $persistence.storageClassName }}
+{{- $accessModes := $entry.accessModes | default $persistence.accessModes }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $claimName | quote }}
+  labels:
+    {{- include "cluster.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: clickhouse
+    {{- with $entry.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  annotations:
+    # Unlike the claims a StatefulSet creates itself, this one belongs to the
+    # release and would be garbage-collected with it, taking the data along.
+    helm.sh/resource-policy: keep
+    {{- include "cluster.argocdAnnotations" "pvc" | nindent 4 }}
+    {{- with $persistence.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- with $entry.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  accessModes:
+    {{- toYaml $accessModes | nindent 4 }}
+  {{- with $storageClassName }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ $size | quote }}
+{{- end }}
+{{- end }}
+{{- end }}

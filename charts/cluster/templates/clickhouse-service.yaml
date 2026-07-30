@@ -1,0 +1,62 @@
+{{- if and .Values.clickhouse.enabled .Values.clickhouse.service.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "cluster.clickhouseServiceName" . }}
+  labels:
+    {{- include "cluster.labels" . | nindent 4 }}
+    app.kubernetes.io/component: clickhouse
+  {{- /* Chart-owned keys are the merge destination, so they win a collision
+         with clickhouse.service.annotations. */}}
+  {{- $svcAnnotations := merge (include "cluster.argocdAnnotations" "clickhouse-service" | fromYaml) (.Values.clickhouse.service.annotations | default dict) }}
+  annotations:
+    {{- toYaml $svcAnnotations | nindent 4 }}
+spec:
+  type: ClusterIP
+  {{- with .Values.clickhouse.service.sessionAffinity }}
+  sessionAffinity: {{ . }}
+  {{- end }}
+  {{- /*
+  Operator-owned Pod labels, from internal/controller/clickhouse/templates.go:
+  the StatefulSet pod template carries app=<CR>-clickhouse alongside
+  clickhouse.com/role=clickhouse-server. `app` on its own is what the operator's
+  own headless Service selects, so it is guaranteed to match; the role label
+  narrows it further so the operator's version-probe Pod — which runs the same
+  image but serves no queries — never lands in this endpoint set.
+
+  publishNotReadyAddresses is deliberately left at its false default. That is the
+  whole point of this Service: the headless one sets it true, so its DNS hands
+  out Pods that are still starting.
+  */}}
+  selector:
+    app: {{ printf "%s-clickhouse" (include "cluster.clickhouseName" .) | quote }}
+    clickhouse.com/role: clickhouse-server
+  ports:
+    {{- /*
+    Port set mirrors the operator's buildProtocols(): the plaintext pair is
+    dropped only when TLS is both enabled and required, because that is when the
+    server stops listening on them. Ports the operator exposes for its own use
+    (interserver 9009, management 9001/9002) are left off — this Service is for
+    query clients. Prometheus scraping keeps using the headless Service.
+    */}}
+    {{- if or (not .Values.tls.enabled) (not .Values.tls.required) }}
+    - name: http
+      port: 8123
+      targetPort: 8123
+      protocol: TCP
+    - name: tcp
+      port: 9000
+      targetPort: 9000
+      protocol: TCP
+    {{- end }}
+    {{- if .Values.tls.enabled }}
+    - name: http-secure
+      port: 8443
+      targetPort: 8443
+      protocol: TCP
+    - name: tcp-secure
+      port: 9440
+      targetPort: 9440
+      protocol: TCP
+    {{- end }}
+{{- end }}

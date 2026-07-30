@@ -13,17 +13,21 @@ metadata:
   labels:
     {{- include "cluster.labels" . | nindent 4 }}
     app.kubernetes.io/component: keeper-tls
-  {{- with include "cluster.argocdAnnotations" . }}
   annotations:
-    {{- . | nindent 4 }}
-  {{- end }}
+    {{- include "cluster.argocdAnnotations" "certs" | nindent 4 }}
 spec:
   secretName: {{ include "cluster.keeperTlsSecretName" . }}
   issuerRef:
     name: {{ .Values.tls.issuerRef.name }}
     kind: {{ .Values.tls.issuerRef.kind }}
   # Operator service pattern: <KeeperCluster.metadata.name>-keeper-headless
+  #
+  # Both forms are needed. A TLS wildcard matches exactly one label, so
+  # `*.<svc>.<ns>.svc` covers the per-Pod name and *not* the Service name itself
+  # — which is the name clients actually connect to.
   dnsNames:
+    - "{{ $keeperName }}-keeper-headless.{{ $ns }}.svc"
+    - "{{ $keeperName }}-keeper-headless.{{ $ns }}.svc.cluster.local"
     - "*.{{ $keeperName }}-keeper-headless.{{ $ns }}.svc"
     - "*.{{ $keeperName }}-keeper-headless.{{ $ns }}.svc.cluster.local"
 ---
@@ -36,18 +40,26 @@ metadata:
   labels:
     {{- include "cluster.labels" . | nindent 4 }}
     app.kubernetes.io/component: clickhouse-tls
-  {{- with include "cluster.argocdAnnotations" . }}
   annotations:
-    {{- . | nindent 4 }}
-  {{- end }}
+    {{- include "cluster.argocdAnnotations" "certs" | nindent 4 }}
 spec:
   secretName: {{ include "cluster.clickhouseTlsSecretName" . }}
   issuerRef:
     name: {{ .Values.tls.issuerRef.name }}
     kind: {{ .Values.tls.issuerRef.kind }}
   # Operator service pattern: <ClickHouseCluster.metadata.name>-clickhouse-headless
+  #
+  # The bare Service names matter as much as the wildcards: a wildcard matches
+  # exactly one label, so `*.<svc>.<ns>.svc` covers per-Pod names only. Rotel and
+  # every query client dial the Service name, which no wildcard here matches.
   dnsNames:
+    - "{{ $chName }}-clickhouse-headless.{{ $ns }}.svc"
+    - "{{ $chName }}-clickhouse-headless.{{ $ns }}.svc.cluster.local"
     - "*.{{ $chName }}-clickhouse-headless.{{ $ns }}.svc"
     - "*.{{ $chName }}-clickhouse-headless.{{ $ns }}.svc.cluster.local"
+    {{- if .Values.clickhouse.service.enabled }}
+    - "{{ include "cluster.clickhouseServiceName" . }}.{{ $ns }}.svc"
+    - "{{ include "cluster.clickhouseServiceName" . }}.{{ $ns }}.svc.cluster.local"
+    {{- end }}
 {{- end }}
 {{- end }}

@@ -1,4 +1,5 @@
 {{- if .Values.keeper.enabled }}
+{{- include "cluster.rejectPodTemplateMetadata" (dict "root" $ "component" "keeper") }}
 apiVersion: clickhouse.com/v1alpha1
 kind: KeeperCluster
 metadata:
@@ -6,11 +7,23 @@ metadata:
   labels:
     {{- include "cluster.labels" . | nindent 4 }}
     app.kubernetes.io/component: keeper
-  {{- with include "cluster.argocdAnnotations" . }}
+  annotations:
+    {{- include "cluster.argocdAnnotations" "keeper" | nindent 4 }}
+spec:
+  {{- /*
+  See the note on the ClickHouseCluster: spec.labels / spec.annotations are the
+  operator's only metadata hook, and podTemplate has no equivalent. Annotations
+  additionally reach the StatefulSet's volumeClaimTemplates, which Kubernetes
+  treats as immutable — see the values comment before changing them in place.
+  */}}
+  {{- with include "cluster.operatorResourceLabels" (dict "root" $ "extra" .Values.keeper.labels) }}
+  labels:
+    {{- . | nindent 4 }}
+  {{- end }}
+  {{- with include "cluster.stringMap" .Values.keeper.annotations }}
   annotations:
     {{- . | nindent 4 }}
   {{- end }}
-spec:
   replicas: {{ .Values.keeper.replicas }}
   dataVolumeClaimSpec:
     {{- with .Values.keeper.persistence.storageClassName }}
@@ -21,12 +34,9 @@ spec:
     resources:
       requests:
         storage: {{ .Values.keeper.persistence.size | quote }}
-    {{- with .Values.keeper.persistence.annotations }}
-    # PVC annotations are applied via pod/volume templates when supported
-    {{- end }}
   containerTemplate:
     image:
-      repository: {{ .Values.keeper.image.repository | quote }}
+      repository: {{ include "cluster.imageRepository" .Values.keeper.image | quote }}
       tag: {{ .Values.keeper.image.tag | quote }}
     imagePullPolicy: {{ .Values.keeper.image.pullPolicy }}
     resources:
@@ -37,14 +47,6 @@ spec:
     {{- end }}
     {{- with .Values.keeper.podTemplate.nodeHostnameKey }}
     nodeHostnameKey: {{ . | quote }}
-    {{- end }}
-    {{- with .Values.keeper.podTemplate.labels }}
-    labels:
-      {{- toYaml . | nindent 6 }}
-    {{- end }}
-    {{- with .Values.keeper.podTemplate.annotations }}
-    annotations:
-      {{- toYaml . | nindent 6 }}
     {{- end }}
     {{- with .Values.keeper.podTemplate.nodeSelector }}
     nodeSelector:

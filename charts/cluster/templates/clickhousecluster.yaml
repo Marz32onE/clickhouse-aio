@@ -1,4 +1,5 @@
 {{- if .Values.clickhouse.enabled }}
+{{- include "cluster.rejectPodTemplateMetadata" (dict "root" $ "component" "clickhouse") }}
 {{- $keeperName := .Values.clickhouse.keeperClusterRef.name | default (include "cluster.keeperName" .) }}
 {{- if and .Values.keeper.enabled (not .Values.clickhouse.keeperClusterRef.name) }}
 {{- $keeperName = include "cluster.keeperName" . }}
@@ -10,11 +11,23 @@ metadata:
   labels:
     {{- include "cluster.labels" . | nindent 4 }}
     app.kubernetes.io/component: clickhouse
-  {{- with include "cluster.argocdAnnotations" . }}
+  annotations:
+    {{- include "cluster.argocdAnnotations" "clickhouse" | nindent 4 }}
+spec:
+  {{- /*
+  spec.labels / spec.annotations are the operator's only metadata hook: it
+  merges them into the StatefulSets, Pods, headless Service, ConfigMaps, Secrets
+  and PodDisruptionBudgets it creates. Operator-owned keys are merged last and
+  win, so neither can shadow app/clickhouse.com/* labels.
+  */}}
+  {{- with include "cluster.operatorResourceLabels" (dict "root" $ "extra" .Values.clickhouse.labels) }}
+  labels:
+    {{- . | nindent 4 }}
+  {{- end }}
+  {{- with include "cluster.stringMap" .Values.clickhouse.annotations }}
   annotations:
     {{- . | nindent 4 }}
   {{- end }}
-spec:
   replicas: {{ .Values.clickhouse.replicas }}
   shards: {{ .Values.clickhouse.shards }}
   keeperClusterRef:
@@ -30,7 +43,7 @@ spec:
         storage: {{ .Values.clickhouse.persistence.size | quote }}
   containerTemplate:
     image:
-      repository: {{ .Values.clickhouse.image.repository | quote }}
+      repository: {{ include "cluster.imageRepository" .Values.clickhouse.image | quote }}
       tag: {{ .Values.clickhouse.image.tag | quote }}
     imagePullPolicy: {{ .Values.clickhouse.image.pullPolicy }}
     resources:
@@ -49,14 +62,6 @@ spec:
     {{- end }}
     {{- with .Values.clickhouse.podTemplate.nodeHostnameKey }}
     nodeHostnameKey: {{ . | quote }}
-    {{- end }}
-    {{- with .Values.clickhouse.podTemplate.labels }}
-    labels:
-      {{- toYaml . | nindent 6 }}
-    {{- end }}
-    {{- with .Values.clickhouse.podTemplate.annotations }}
-    annotations:
-      {{- toYaml . | nindent 6 }}
     {{- end }}
     {{- with .Values.clickhouse.podTemplate.nodeSelector }}
     nodeSelector:
@@ -82,15 +87,33 @@ spec:
   additionalPorts:
     {{- toYaml . | nindent 4 }}
   {{- end }}
-  {{- with .Values.clickhouse.versionProbe.resources }}
+  {{- $probe := .Values.clickhouse.versionProbe | default dict }}
+  {{- if or $probe.resources $probe.nodeSelector $probe.labels $probe.annotations }}
   versionProbeTemplate:
     spec:
       template:
+        {{- if or $probe.labels $probe.annotations }}
+        metadata:
+          {{- with $probe.labels }}
+          labels:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $probe.annotations }}
+          annotations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        {{- end }}
         spec:
+          {{- with $probe.resources }}
           containers:
             - name: version-probe
               resources:
                 {{- toYaml . | nindent 16 }}
+          {{- end }}
+          {{- with $probe.nodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
   {{- end }}
   settings:
     enableDatabaseSync: {{ .Values.clickhouse.settings.enableDatabaseSync }}
